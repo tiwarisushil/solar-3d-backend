@@ -1,0 +1,34 @@
+import mongoose from 'mongoose';
+import { ROLES, STAFF_PERMISSIONS } from '../constants/index.js';
+import { PERMISSIONS_VERSION } from '../constants/permissions.js';
+import { schemaOptions, text } from './schemaOptions.js';
+
+const userSchema = new mongoose.Schema(
+  {
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true, maxlength: 200 },
+    passwordHash: { type: String, required: true },
+    role: { type: String, enum: Object.values(ROLES), required: true },
+    name: text(120),
+    company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null, index: true },
+    organization: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', default: null, index: true },
+    client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client', default: null, index: true }, // for role 'client': the client record this login belongs to
+    /** Direct manager (area manager) — same branch, role agent only. */
+    manager: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    // agents (field staff) — managed by their company
+    phone: text(40),
+    jobTitle: text(80), // legacy single role; prefer `roles`
+    roles: { type: [{ type: String, trim: true, maxlength: 40 }], default: () => [] },
+    // what this staff member may do in the company workspace beyond their own assigned steps (role 'agent' only):
+    // the permissions of their roles plus these extra grants on their own account (see constants/permissions.js)
+    staffRoles: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Role' }], default: () => [] },
+    permissions: { type: [{ type: String, enum: STAFF_PERMISSIONS }], default: () => [] },
+    permissionsVersion: { type: Number, default: PERMISSIONS_VERSION }, // names of `permissions`; older accounts are migrated once
+    photo: text(300), // /uploads/… portrait (optional)
+    active: { type: Boolean, default: true }, // an inactive agent cannot sign in
+    lastLoginAt: Date,
+    tokenVersion: { type: Number, default: 0 }, // bumped when the password changes: every older sign-in token stops working
+  },
+  schemaOptions,
+);
+
+export const User = mongoose.model('User', userSchema);

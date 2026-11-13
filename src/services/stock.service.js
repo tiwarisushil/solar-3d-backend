@@ -1,0 +1,532 @@
+// Stock: batches (one per receipt), the serial units of serialized products, and taking stock out.
+//
+// Every change to `qtyRemaining` is one atomic update with a `$gte` guard, so two sales at the same moment can never
+// take the same items; selling and invoicing (billing.service.js) or issuing to an installation (project.service.js)
+// run in one MongoDB transaction with the deduction (`inTransaction`). Transactions need a replica set — Atlas always
+// is one; a local mongod must be started with --replSet (see backend/.env.example).
+import mongoose from 'mongoose';
+import { PRICE_TYPES, UNIT_TRANSITIONS } from '../constants/index.js';
+import { Batch, EwayBill, Invoice, Product, Project, SerialUnit, Supplier } from '../models/index.js';
+import { warrantyEndDate } from '../models/serialUnit.model.js';
+import { badRequest, conflict, notFound } from '../utils/HttpError.js';
+import { deleteFile } from './storage.service.js';
+import { parsePagination, toApiJSON, toApiJSONList } from '../utils/lean.js';
+import { pick } from '../utils/pick.js';
+import { objectId } from '../utils/validators.js';
+import { catalogOwner } from '../utils/catalogOwner.js';
+import { requireProductInactive } from '../utils/productActive.js';
+
+export const PRICE_FIELD = { base: 'basePrice', wholesale: 'wholesalePrice', retail: 'retailPrice' };
+const UNIT_LABEL = { inStock: 'in stock', sold: 'sold', installed: 'installed', returned: 'returned' };
+const MAX_SERIALS = 2000;
+const BATCH_FIELDS = ['batchNo', 'mfgDate', 'mfgYear', 'receivedDate', 'purchasePrice', 'basePrice', 'wholesalePrice', 'retailPrice', 'note'];
+
+/** Run `fn(session)` in a transaction (retried on transient errors such as two sales touching the same batch). */
+export const inTransaction = (fn) => mongoose.connection.transaction(fn);
+
+async function ownProduct(company, id, session = null) {
+  const product = await Product.findOne({ _id: objectId(id, 'Product'), ...catalogOwner(company) }).session(session); // shared catalog; stock stays per branch
+  if (!product) throw notFound('Product');
+  return product;
+}
+
+function assertProductActiveForSale(product) {
+  if (product.isActive === false) throw badRequest(`“${product.name}” is inactive and can’t be sold or billed`);
+}
+
+async function ownSupplier(company, id, session = null) {
+  if (!id) throw badRequest('Choose the supplier');
+  const supplier = await Supplier.findOne({ _id: objectId(id, 'Supplier'), company: company._id }).select('_id').session(session);
+  if (!supplier) throw notFound('Supplier');
+  return supplier;
+}
+
+/** Serial numbers as typed: trimmed, blanks dropped, a repeat is an error. */
+export function cleanSerials(list) {
+  if (list == null) return [];
+  if (!Array.isArray(list)) throw badRequest('Invalid serial numbers');
+  const out = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const s = String(raw ?? '').trim();
+    if (!s) continue;
+    if (s.length > 80) throw badRequest(`Serial number “${s.slice(0, 20)}…” is too long`);
+    if (seen.has(s.toLowerCase())) throw badRequest(`Serial number ${s} is listed twice`);
+    seen.add(s.toLowerCase());
+    out.push(s);
+  }
+  if (out.length > MAX_SERIALS) throw badRequest(`Up to ${MAX_SERIALS} serial numbers at a time`);
+  return out;
+}
+
+/** The dates and prices of a batch from the form; prices must be numbers ≥ 0 (the schema enforces "required"). */
+function batchFields(body) {
+  const data = pick(body, BATCH_FIELDS);
+  for (const k of ['purchasePrice', 'basePrice', 'wholesalePrice', 'retailPrice']) {
+    if (data[k] === undefined || data[k] === null || data[k] === '') {
+      delete data[k];
+      continue;
+    }
+    const n = Number(data[k]);
+    if (!Number.isFinite(n) || n < 0) throw badRequest('Prices must be 0 or more');
+    data[k] = n;
+  }
+  for (const k of ['mfgDate', 'receivedDate']) {
+    if (data[k] === '' || data[k] === null) data[k] = k === 'mfgDate' ? null : undefined;
+    else if (data[k] !== undefined && Number.isNaN(new Date(data[k]).getTime())) throw badRequest('Invalid date');
+  }
+  if (data.mfgYear === '') data.mfgYear = null;
+  return data;
+}
+
+/* ───────────── receiving ───────────── */
+
+/**
+ * Receive stock of a product: one new batch, and for a serialized product one SerialUnit per serial number
+ * (the quantity is then the number of serials).
+ */
+export async function receiveStock(company, productId, body = {}) {
+  return inTransaction(async (session) => {
+    const product = await ownProduct(company, productId, session);
+    requireProductInactive(product, 'receive stock');
+    const supplier = await ownSupplier(company, body.supplier, session);
+    const serials = product.isSerialized ? cleanSerials(body.serials) : [];
+    let qty = Number(body.qtyReceived);
+    if (product.isSerialized) {
+      if (!serials.length) throw badRequest(`${product.name} is tracked by serial number: enter the serial number of every item received`);
+      if (body.qtyReceived != null && body.qtyReceived !== '' && qty !== serials.length) throw badRequest(`Quantity is ${qty} but ${serials.length} serial numbers were entered`);
+      qty = serials.length;
+      const taken = await SerialUnit.find({ company: company._id, serialNo: { $in: serials } }).select('serialNo').session(session).lean();
+      if (taken.length) throw conflict(`Already received: ${taken.map((u) => u.serialNo).slice(0, 10).join(', ')}`);
+    }
+    if (!(qty > 0)) throw badRequest('Enter the quantity received');
+    const [batch] = await Batch.create([{ ...batchFields(body), company: company._id, product: product._id, supplier: supplier._id, qtyReceived: qty, qtyRemaining: qty }], { session });
+    if (serials.length) await SerialUnit.insertMany(serials.map((serialNo) => ({ company: company._id, product: product._id, batch: batch._id, serialNo })), { session });
+    return batch;
+  });
+}
+
+/** Keeps the supplier's bill (already stored by uploadStockBill) with a batch; a bill uploaded before is replaced. */
+export async function attachBatchBill(company, batchId, file) {
+  if (!file?.filename) throw badRequest('Choose the bill to upload (PDF or image)');
+  let batch;
+  try {
+    batch = await Batch.findOne({ _id: objectId(batchId, 'Batch'), company: company._id });
+    if (!batch) throw notFound('Batch');
+    requireProductInactive(await ownProduct(company, batch.product), 'attach a bill to a batch');
+  } catch (e) {
+    await deleteFile(file.filename).catch(() => {});
+    throw e;
+  }
+  const old = batch.billUrl;
+  batch.billUrl = `/uploads/${file.filename}`;
+  batch.billName = String(file.originalname || 'Bill').slice(0, 200);
+  await batch.save();
+  if (old) await deleteFile(old.replace(/^\/uploads\//, '')).catch(() => {});
+  return toApiJSON(batch.toObject());
+}
+
+/** Drop in-stock serial units from a lot and reduce the batch counts (product must be inactive). */
+export async function removeUnitsFromBatch(company, batchId, { unitIds } = {}) {
+  return inTransaction(async (session) => {
+    const batch = await Batch.findOne({ _id: objectId(batchId, 'Batch'), company: company._id }).session(session);
+    if (!batch) throw notFound('Batch');
+    const product = await ownProduct(company, batch.product, session);
+    requireProductInactive(product, 'adjust stock');
+    const ids = [...new Set((unitIds || []).map((id) => String(id)))];
+    if (!ids.length) throw badRequest('Choose at least one unit to remove from inventory');
+    const units = await SerialUnit.find({
+      _id: { $in: ids.map((id) => objectId(id, 'Unit')) },
+      company: company._id,
+      batch: batch._id,
+      product: product._id,
+    }).session(session);
+    if (units.length !== ids.length) throw badRequest('Some units were not found in this lot');
+    const blocked = units.find((u) => u.status !== 'inStock');
+    if (blocked) throw conflict(`Only units still in stock can be removed. ${blocked.serialNo} is ${UNIT_LABEL[blocked.status] || blocked.status}.`);
+    const n = units.length;
+    const updated = await Batch.findOneAndUpdate(
+      { _id: batch._id, qtyRemaining: { $gte: n }, qtyReceived: { $gte: n } },
+      { $inc: { qtyRemaining: -n, qtyReceived: -n } },
+      { session, returnDocument: 'after' },
+    );
+    if (!updated) throw conflict('Could not update batch quantities — refresh and try again');
+    await SerialUnit.deleteMany({ _id: { $in: units.map((u) => u._id) } }, { session });
+    return toApiJSON(updated.toObject());
+  });
+}
+
+/** Add more in-stock serial units to an existing lot (serialized products only; product must be inactive). */
+export async function addSerialsToBatch(company, batchId, { serials } = {}) {
+  return inTransaction(async (session) => {
+    const batch = await Batch.findOne({ _id: objectId(batchId, 'Batch'), company: company._id }).session(session);
+    if (!batch) throw notFound('Batch');
+    const product = await ownProduct(company, batch.product, session);
+    requireProductInactive(product, 'add stock to a lot');
+    if (!product.isSerialized) throw badRequest('This product is not tracked by serial number');
+    const list = cleanSerials(serials);
+    const taken = await SerialUnit.find({ company: company._id, serialNo: { $in: list } }).select('serialNo').session(session).lean();
+    if (taken.length) throw conflict(`Already received: ${taken.map((u) => u.serialNo).slice(0, 10).join(', ')}`);
+    const n = list.length;
+    const updated = await Batch.findOneAndUpdate({ _id: batch._id }, { $inc: { qtyReceived: n, qtyRemaining: n } }, { session, returnDocument: 'after' });
+    await SerialUnit.insertMany(list.map((serialNo) => ({ company: company._id, product: product._id, batch: batch._id, serialNo })), { session });
+    return toApiJSON(updated.toObject());
+  });
+}
+
+/**
+ * Void an entire lot: removes remaining inventory from this receipt. Serialized lots must have every unit still in stock;
+ * non-serialized lots must still hold their full received quantity.
+ */
+export async function voidBatchLot(company, batchId) {
+  return inTransaction(async (session) => {
+    const batch = await Batch.findOne({ _id: objectId(batchId, 'Batch'), company: company._id }).session(session);
+    if (!batch) throw notFound('Batch');
+    const product = await ownProduct(company, batch.product, session);
+    requireProductInactive(product, 'void a lot');
+    if (product.isSerialized) {
+      const all = await SerialUnit.find({ company: company._id, batch: batch._id }).session(session);
+      const blocked = all.filter((u) => u.status !== 'inStock');
+      if (blocked.length) {
+        throw conflict(
+          `This lot can’t be voided: ${blocked.length} unit(s) are sold, installed, or returned. Cancel open bills or return stock first.`,
+        );
+      }
+      if (all.length) await SerialUnit.deleteMany({ company: company._id, batch: batch._id }, { session });
+    } else if (batch.qtyReceived !== batch.qtyRemaining) {
+      throw conflict('Some of this batch was already sold or issued — the lot can’t be voided.');
+    }
+    const billFile = batch.billUrl ? batch.billUrl.replace(/^\/uploads\//, '') : '';
+    await Batch.deleteOne({ _id: batch._id }, { session });
+    if (billFile) await deleteFile(billFile).catch(() => {});
+    return { ok: true };
+  });
+}
+
+function applyBatchQuantities(batch, product, body) {
+  if (body.qtyReceived === undefined && body.qtyRemaining === undefined) return;
+  if (product.isSerialized) throw badRequest('Adjust quantity by adding or removing serial numbers in this lot');
+  const dispatched = batch.qtyReceived - batch.qtyRemaining;
+  const nextReceived = body.qtyReceived !== undefined ? Number(body.qtyReceived) : batch.qtyReceived;
+  const nextRemaining = body.qtyRemaining !== undefined ? Number(body.qtyRemaining) : batch.qtyRemaining;
+  if (!Number.isFinite(nextReceived) || nextReceived < 0) throw badRequest('Enter a valid quantity received');
+  if (!Number.isFinite(nextRemaining) || nextRemaining < 0) throw badRequest('Enter a valid quantity in stock');
+  if (nextRemaining > nextReceived) throw badRequest('In stock can’t be more than the quantity received');
+  if (nextReceived < dispatched) {
+    throw conflict(
+      `Quantity received can’t be less than ${dispatched} — that many ${product.unit || 'units'} were already sold or issued from this batch.`,
+    );
+  }
+  if (nextReceived - nextRemaining < dispatched) {
+    throw conflict(
+      `This batch had ${dispatched} sold or issued — with ${nextRemaining} in stock, quantity received must be at least ${dispatched + nextRemaining}, or lower the in-stock quantity.`,
+    );
+  }
+  batch.qtyReceived = nextReceived;
+  batch.qtyRemaining = nextRemaining;
+}
+
+/** Correct a batch's details, prices and (non-serialized) quantities while the product is inactive. */
+export async function updateBatch(company, id, body = {}) {
+  const batch = await Batch.findOne({ _id: objectId(id, 'Batch'), company: company._id });
+  if (!batch) throw notFound('Batch');
+  const product = await ownProduct(company, batch.product);
+  requireProductInactive(product, 'edit a batch or receive stock');
+  Object.assign(batch, batchFields(body));
+  if (body.supplier !== undefined) batch.supplier = (await ownSupplier(company, body.supplier))._id;
+  applyBatchQuantities(batch, product, body);
+  await batch.save();
+  return toApiJSON(batch.toObject());
+}
+
+/* ───────────── taking stock out ───────────── */
+
+/** `-n` from one batch, only if it still has `n` (the guard that stops overselling). */
+async function takeFromBatch(company, product, batchId, n, session) {
+  const updated = await Batch.findOneAndUpdate(
+    { _id: batchId, company: company._id, product: product._id, qtyRemaining: { $gte: n } },
+    { $inc: { qtyRemaining: -n } },
+    { session, returnDocument: 'after' },
+  ).lean();
+  if (updated) return updated;
+  const batch = await Batch.findOne({ _id: batchId, company: company._id, product: product._id }).select('qtyRemaining batchNo').session(session).lean();
+  if (!batch) throw notFound('Batch');
+  throw conflict(`${batch.batchNo ? `Batch ${batch.batchNo}` : 'This batch'} of ${product.name} has only ${batch.qtyRemaining} ${product.unit} left`);
+}
+
+/**
+ * Take items of `product` out of stock inside `session`:
+ * - serialized: exactly the units with these serial numbers (they must be in stock), moved to `unitUpdate.status`;
+ * - otherwise `qty` from the chosen `batch`, or oldest batches first (FIFO by receivedDate).
+ * Returns one allocation per batch used: [{ batch (lean, after the update), qty, serials }].
+ */
+export async function deductStock(company, product, { qty, batch, serials } = {}, session, unitUpdate = {}) {
+  if (!session) throw new Error('deductStock must run inside a transaction');
+  if (product.isSerialized) {
+    const wanted = cleanSerials(serials);
+    if (!wanted.length) throw badRequest(`Choose the serial numbers of ${product.name}`);
+    if (qty != null && qty !== '' && Number(qty) !== wanted.length) throw badRequest(`Quantity of ${product.name} is ${qty} but ${wanted.length} serial numbers were chosen`);
+    const units = await SerialUnit.find({ company: company._id, product: product._id, serialNo: { $in: wanted }, status: 'inStock' }).session(session).lean();
+    if (units.length !== wanted.length) {
+      const found = new Set(units.map((u) => u.serialNo));
+      throw conflict(`Not in stock: ${wanted.filter((s) => !found.has(s)).slice(0, 10).join(', ')}`);
+    }
+    const moved = await SerialUnit.updateMany({ _id: { $in: units.map((u) => u._id) }, status: 'inStock' }, { $set: unitUpdate }, { session });
+    if (moved.modifiedCount !== units.length) throw conflict('Some of these units were just sold. Refresh and try again');
+    const byBatch = new Map();
+    for (const u of units) byBatch.set(String(u.batch), [...(byBatch.get(String(u.batch)) || []), u.serialNo]);
+    const out = [];
+    for (const [batchId, list] of byBatch) out.push({ batch: await takeFromBatch(company, product, batchId, list.length, session), qty: list.length, serials: list });
+    return out;
+  }
+
+  const need = Number(qty);
+  if (!(need > 0)) throw badRequest(`Enter the quantity of ${product.name}`);
+  if (batch) return [{ batch: await takeFromBatch(company, product, objectId(batch, 'Batch'), need, session), qty: need, serials: [] }];
+
+  const batches = await Batch.find({ company: company._id, product: product._id, qtyRemaining: { $gt: 0 } }).sort({ receivedDate: 1, _id: 1 }).session(session).lean();
+  const available = batches.reduce((a, b) => a + b.qtyRemaining, 0);
+  if (available < need) throw conflict(`Only ${available} ${product.unit} of ${product.name} in stock`);
+  const out = [];
+  let left = need;
+  for (const b of batches) {
+    if (!left) break;
+    const take = Math.min(left, b.qtyRemaining);
+    out.push({ batch: await takeFromBatch(company, product, b._id, take, session), qty: take, serials: [] });
+    left -= take;
+  }
+  return out;
+}
+
+/**
+ * Invoice lines → stored lines. A line with a `productId` takes its stock now (FIFO, a chosen batch, or chosen serials)
+ * and is priced from the batch at the chosen price type; it becomes one line per batch used, carrying copies of the
+ * batch number, serials, price type and rate, so editing the batch later never changes the invoice. Lines without
+ * a product (labour, charges…) pass through unchanged.
+ * The sold units point at the document that took them: an invoice (`invoiceId`) or an e-way bill (`ewayBillId`,
+ * the invoice follows later — billing.service.js createInvoiceFromBills fills in `soldInvoice` then).
+ */
+export async function allocateInvoiceLines(company, lines, { invoiceId = null, ewayBillId = null, session }) {
+  const out = [];
+  for (const line of lines || []) {
+    if (!line?.productId) {
+      out.push(line);
+      continue;
+    }
+    const product = await ownProduct(company, line.productId, session);
+    assertProductActiveForSale(product);
+    if (!PRICE_TYPES.includes(line.priceType)) throw badRequest(`Choose the base, wholesale or retail price for ${product.name}`);
+    const allocations = await deductStock(company, product, line, session, { status: 'sold', soldInvoice: invoiceId, soldEwayBill: ewayBillId });
+    for (const a of allocations) {
+      out.push({
+        ...line,
+        name: String(line.name || '').trim() || product.name,
+        detail: line.detail || '', // serial numbers travel in `serials`; the PDF prints them
+        hsn: line.hsn || product.hsnCode,
+        unit: line.unit || product.unit,
+        gstPercent: line.gstPercent ?? product.gstPercent,
+        productId: String(product._id),
+        batch: String(a.batch._id),
+        batchNo: a.batch.batchNo || '',
+        serials: a.serials,
+        priceType: line.priceType,
+        qty: a.qty,
+        rate: a.batch[PRICE_FIELD[line.priceType]],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Put part of one line's stock back (open product bill only). Non-serialized: `qty` units to the batch.
+ * Serialized: listed serials that are still sold on this e-way bill.
+ */
+export async function returnStockPartial(company, line, { qty, serials = [] }, ewayBillId, session) {
+  if (!session) throw new Error('returnStockPartial must run inside a transaction');
+  if (!line?.productId || !line.batch) throw badRequest('Invalid product line');
+  const batchId = objectId(line.batch, 'Batch');
+  const serialList = Array.isArray(serials) ? serials.map(String) : [];
+  if (serialList.length) {
+    const restored = await SerialUnit.updateMany(
+      { company: company._id, soldEwayBill: ewayBillId, serialNo: { $in: serialList }, status: 'sold' },
+      { $set: { status: 'inStock', soldEwayBill: null, soldInvoice: null } },
+      { session },
+    );
+    if (restored.modifiedCount !== serialList.length) throw conflict('Some serial numbers are not on this bill or were already returned');
+    if (restored.modifiedCount > 0) await Batch.updateOne({ _id: batchId, company: company._id }, { $inc: { qtyRemaining: restored.modifiedCount } }, { session });
+    return restored.modifiedCount;
+  }
+  const n = Number(qty);
+  if (!(n > 0)) throw badRequest('Enter how many came back');
+  const onBill = Number(line.qty) || 0;
+  if (n - onBill > 0.0005) throw badRequest(`Only ${onBill} can be returned on this line`);
+  await Batch.updateOne({ _id: batchId, company: company._id }, { $inc: { qtyRemaining: n } }, { session });
+  return n;
+}
+
+/** Move sold serial units from one open product bill to another (no batch change). */
+export async function reassignSoldSerials(company, lines, fromEwayId, toEwayId, session) {
+  if (!session) throw new Error('reassignSoldSerials must run inside a transaction');
+  for (const line of lines || []) {
+    const serials = Array.isArray(line.serials) ? line.serials : [];
+    if (!serials.length) continue;
+    const moved = await SerialUnit.updateMany(
+      { company: company._id, soldEwayBill: fromEwayId, serialNo: { $in: serials }, status: 'sold' },
+      { $set: { soldEwayBill: toEwayId } },
+      { session },
+    );
+    if (moved.modifiedCount !== serials.length) throw conflict('Some units are no longer on this bill. Refresh and try again');
+  }
+}
+
+/**
+ * serial units (still `sold` on this e-way bill) go back in stock, counted one by one. Runs inside the cancelling transaction.
+ */
+export async function returnStock(company, lines, { ewayBillId, session }) {
+  if (!session) throw new Error('returnStock must run inside a transaction');
+  for (const line of lines || []) {
+    if (!line?.productId || !line.batch) continue;
+    const batchId = objectId(line.batch, 'Batch');
+    const serials = Array.isArray(line.serials) ? line.serials : [];
+    let qty = Number(line.qty) || 0;
+    if (serials.length) {
+      // a serialized line: only the units that are still sold on this e-way bill come back, and the batch gets back
+      // exactly that many, so its count never exceeds the units really in stock
+      const restored = await SerialUnit.updateMany(
+        { company: company._id, soldEwayBill: ewayBillId, serialNo: { $in: serials }, status: 'sold' },
+        { $set: { status: 'inStock', soldEwayBill: null, soldInvoice: null } },
+        { session },
+      );
+      qty = restored.modifiedCount;
+    }
+    if (qty > 0) await Batch.updateOne({ _id: batchId, company: company._id }, { $inc: { qtyRemaining: qty } }, { session });
+  }
+}
+
+/* ───────────── serial units ───────────── */
+
+/** Throws unless a unit may move from `from` to `to` (constants UNIT_TRANSITIONS). */
+export function assertTransition(from, to) {
+  if (!UNIT_TRANSITIONS[from]?.includes(to)) throw badRequest(`A unit that is ${UNIT_LABEL[from] || from} can't be marked ${UNIT_LABEL[to] || to}`);
+}
+
+/**
+ * Change a unit's status by hand. Selling and issuing to an installation take units out of stock through invoices
+ * and installations, so here only: sold → installed (at an installation), sold/installed → returned, and
+ * returned → in stock (back into its batch).
+ */
+export async function setUnitStatus(company, unitId, body = {}) {
+  const to = body.status;
+  return inTransaction(async (session) => {
+    const unit = await SerialUnit.findOne({ _id: objectId(unitId, 'Unit'), company: company._id }).session(session);
+    if (!unit) throw notFound('Unit');
+    requireProductInactive(await ownProduct(company, unit.product, session), 'manage serial units');
+    assertTransition(unit.status, to);
+    if (unit.status === 'inStock') throw badRequest('Sell it on an invoice instead');
+    if (unit.soldEwayBill) {
+      // while its e-way bill is open the unit still belongs to it: cancelling must be able to put it back in stock
+      const ewayBill = await EwayBill.findOne({ _id: unit.soldEwayBill, company: company._id }).select('ewayNo status').session(session).lean();
+      if (ewayBill?.status === 'open') throw conflict(`This unit is on bill ${ewayBill.ewayNo}, which is still open. Invoice it or cancel it first`);
+    }
+    const set = { status: to };
+    if (to === 'installed') {
+      const project = await Project.findOne({ _id: objectId(body.project, 'Installation'), company: company._id }).select('_id').session(session);
+      if (!project) throw notFound('Installation');
+      const installDate = body.installDate ? new Date(body.installDate) : new Date();
+      if (Number.isNaN(installDate.getTime())) throw badRequest('Invalid install date');
+      Object.assign(set, { installedProject: project._id, installDate });
+    }
+    if (to === 'inStock') Object.assign(set, { soldInvoice: null, soldEwayBill: null, installedProject: null, installDate: null });
+    const updated = await SerialUnit.findOneAndUpdate({ _id: unit._id, status: unit.status }, { $set: set }, { session, returnDocument: 'after' });
+    if (!updated) throw conflict('This unit was just changed. Refresh and try again');
+    if (to === 'inStock') await Batch.updateOne({ _id: unit.batch }, { $inc: { qtyRemaining: 1 } }, { session });
+    return updated;
+  });
+}
+
+/* ───────────── reading ───────────── */
+
+/**
+ * Stock on hand and the current selling price of each product: the retail price of the oldest batch that still has
+ * stock (the one FIFO sells next), else of the newest batch, else 0 — and that batch's manufacture year.
+ * Map of productId → { stock, price, mfgYear }.
+ */
+export async function stockSummary(companyId, productIds = null) {
+  const match = { company: companyId, ...(productIds ? { product: { $in: productIds } } : {}) };
+  const batches = await Batch.find(match).select('product qtyRemaining retailPrice mfgYear mfgDate').sort({ receivedDate: 1, _id: 1 }).lean();
+  const out = new Map();
+  for (const b of batches) {
+    const k = String(b.product);
+    const s = out.get(k) || { stock: 0, price: 0, inStockPriced: false };
+    s.stock += b.qtyRemaining;
+    if (!s.inStockPriced) {
+      s.price = b.retailPrice; // ascending order: ends on the newest batch unless one with stock comes first
+      s.mfgYear = b.mfgYear ?? (b.mfgDate ? new Date(b.mfgDate).getFullYear() : null);
+      s.inStockPriced = b.qtyRemaining > 0;
+    }
+    out.set(k, s);
+  }
+  return new Map([...out].map(([k, { stock, price, mfgYear }]) => [k, { stock, price, mfgYear }]));
+}
+
+/** A product's batches, newest first, with the supplier's name. */
+export async function listBatches(company, productId, { inStock } = {}) {
+  const product = await ownProduct(company, productId);
+  const rows = await Batch.find({ company: company._id, product: product._id, ...(inStock ? { qtyRemaining: { $gt: 0 } } : {}) })
+    .sort(inStock ? { receivedDate: 1, _id: 1 } : { receivedDate: -1, _id: -1 })
+    .populate('supplier', 'name')
+    .lean();
+  return toApiJSONList(rows);
+}
+
+const unitJSON = (u, warrantyMonths) => ({ ...toApiJSON(u), warrantyEnd: warrantyEndDate(u.installDate, warrantyMonths) });
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * A serialized product's units (optionally of one status, or whose serial number contains `q`), with their batch
+ * number and warranty end. With `page` it returns one page, { items, total, page, limit } (limit up to 100);
+ * without it every unit (the pickers on invoices and installations need the full in-stock list).
+ */
+export async function listUnits(company, productId, { status, q, batch, page, limit } = {}) {
+  const product = await ownProduct(company, productId);
+  const search = String(q ?? '').trim();
+  const filter = {
+    company: company._id,
+    product: product._id,
+    ...(status ? { status } : {}),
+    ...(batch ? { batch: objectId(batch, 'Batch') } : {}),
+    ...(search ? { serialNo: { $regex: escapeRe(search), $options: 'i' } } : {}),
+  };
+  const query = (skip, max) => {
+    const find = SerialUnit.find(filter).sort({ createdAt: 1, serialNo: 1, _id: 1 });
+    if (max) find.skip(skip).limit(max);
+    return find
+      .populate('batch', 'batchNo receivedDate')
+      .populate({ path: 'installedProject', select: 'design', populate: { path: 'design', select: 'name' } })
+      .lean()
+      .then((rows) => rows.map((u) => unitJSON(u, product.warrantyMonths)));
+  };
+  if (page === undefined) return query(0, 0);
+  const p = parsePagination({ page, limit }, { defaultLimit: 10, maxLimit: 100 });
+  const [items, total] = await Promise.all([query(p.skip, p.limit), SerialUnit.countDocuments(filter)]);
+  return { items, total, page: p.page, limit: p.limit };
+}
+
+/** Look a unit up by its serial number: where it is, which invoice sold it, and when its warranty ends. */
+export async function findUnit(company, serialNo) {
+  const serial = String(serialNo ?? '').trim();
+  if (!serial) throw badRequest('Enter a serial number');
+  const unit = await SerialUnit.findOne({ company: company._id, serialNo: serial })
+    .populate('product', 'name brand model warrantyMonths')
+    .populate('batch', 'batchNo receivedDate')
+    .populate({ path: 'installedProject', select: 'design client', populate: [{ path: 'design', select: 'name' }, { path: 'client', select: 'name' }] })
+    .lean();
+  if (!unit) throw notFound('Unit');
+  const [invoice, ewayBill] = await Promise.all([
+    unit.soldInvoice ? Invoice.findById(unit.soldInvoice).select('invoiceNo issuedOn').lean() : null,
+    unit.soldEwayBill ? EwayBill.findById(unit.soldEwayBill).select('ewayNo issuedOn').lean() : null,
+  ]);
+  return { ...unitJSON(unit, unit.product?.warrantyMonths), soldInvoice: toApiJSON(invoice), soldEwayBill: toApiJSON(ewayBill) };
+}

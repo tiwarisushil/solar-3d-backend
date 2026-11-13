@@ -1,0 +1,91 @@
+// Entry point: connect to MongoDB, run data migrations, seed the super admin, start the HTTP server.
+import app from './app.js';
+import { connectDb } from './config/db.js';
+import { env, redactMongoUri } from './config/env.js';
+import { migrateCatalog } from './migrations/catalog.migration.js';
+import { enforceTenantCatalogIsolation } from './migrations/tenantCatalog.migration.js';
+import { migrateOrgCaps } from './migrations/orgCaps.migration.js';
+import { migrateSharedCatalog } from './migrations/sharedCatalog.migration.js';
+import { ensureSessionTtlIndex } from './migrations/authSessionTtl.migration.js';
+import { capUnlimitedLimits } from './migrations/limits.migration.js';
+import { fixShareTokenIndex } from './migrations/shareToken.migration.js';
+import { migrateLoans } from './migrations/loan.migration.js';
+import { migrateSubsidies } from './migrations/subsidy.migration.js';
+import { markAmcPartsInvoices } from './migrations/invoiceKind.migration.js';
+import { migrateParentCategories } from './migrations/parentCategory.migration.js';
+import { migratePlanRequests } from './migrations/planRequest.migration.js';
+import { capitalizeClientNames, capitalizeProductNames, capitalizeProductUnits } from './migrations/unitCase.migration.js';
+import { backfillProductActive } from './migrations/productActive.migration.js';
+import { backfillLeadAssignmentCompany, ensureUniqueMetaPage } from './migrations/leadTenant.migration.js';
+import { migrateStaffPermissions } from './migrations/staffPermissions.migration.js';
+import { migrateOrganizationHierarchy, backfillUserOrganizationRefs, backfillOrganizationMaxBranches } from './migrations/organizationHierarchy.migration.js';
+import { migrateCompanySetup } from './migrations/companySetup.migration.js';
+import { dropStaleIndexes } from './migrations/staleIndexes.migration.js';
+import { AuthSession } from './models/index.js';
+import { ensureDefaultPlans } from './seeders/plans.seeder.js';
+import { ensureSuperAdmin } from './seeders/superAdmin.seeder.js';
+import { logger } from './utils/logger.js';
+import { startLeadIntegrationWorkers } from './integrations/leads.js';
+import { startAmcReminderWorker } from './services/amc.service.js';
+
+process.on('unhandledRejection', (err) => {
+  logger.error('unhandledRejection', { err: err?.message || String(err) });
+  if (err?.stack) console.error(err.stack);
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  logger.error('uncaughtException', { err: err?.message || String(err) });
+  if (err?.stack) console.error(err.stack);
+  process.exit(1);
+});
+
+try {
+  const db = await connectDb();
+  logger.info('MongoDB connected', { db: db.name });
+  // selling, invoicing and issuing stock run in transactions, which a standalone mongod doesn't support
+  const hello = await db.db.admin().command({ hello: 1 });
+  if (!hello.setName && hello.msg !== 'isdbgrid') logger.warn('MongoDB is not a replica set: stock sales and invoices will fail. See MONGODB_URI in .env.example.');
+} catch (e) {
+  logger.error('Could not connect to MongoDB', {
+    uri: redactMongoUri(env.mongoUri),
+    err: String(e.message).replaceAll(env.mongoUri, '(connection string)'),
+  });
+  process.exit(1);
+}
+if (!env.nodeEnv) logger.warn('NODE_ENV is not set. Set NODE_ENV=production in deployment (security headers, CORS and seed protection depend on it).');
+await dropStaleIndexes(); // before anything writes: old cross-company unique indexes break new companies
+await migrateCatalog();
+await capitalizeProductUnits();
+await backfillProductActive();
+await capitalizeProductNames();
+await capitalizeClientNames();
+await migrateParentCategories();
+await migratePlanRequests();
+await fixShareTokenIndex();
+await migrateLoans();
+await migrateSubsidies();
+await markAmcPartsInvoices();
+await capUnlimitedLimits();
+await ensureSessionTtlIndex();
+await migrateStaffPermissions();
+await migrateOrganizationHierarchy();
+await backfillOrganizationMaxBranches();
+await backfillUserOrganizationRefs();
+await migrateCompanySetup();
+await migrateSharedCatalog(); // needs every branch linked to its organization (above)
+await enforceTenantCatalogIsolation();
+await backfillLeadAssignmentCompany();
+await ensureUniqueMetaPage();
+await ensureDefaultPlans();
+await migrateOrgCaps(); // after the plans carry their caps
+await AuthSession.deleteMany({ $or: [{ expiresAt: null }, { expiresAt: { $exists: false } }] });
+await ensureSuperAdmin();
+startLeadIntegrationWorkers();
+startAmcReminderWorker();
+// how much memory the API holds, every 15 minutes: a figure that keeps climbing between restarts is a leak
+const mb = (n) => Math.round(n / 1048576);
+setInterval(() => {
+  const m = process.memoryUsage();
+  logger.info('memory', { rssMb: mb(m.rss), heapUsedMb: mb(m.heapUsed), heapTotalMb: mb(m.heapTotal), externalMb: mb(m.external), uptimeH: (process.uptime() / 3600).toFixed(1) });
+}, 15 * 60 * 1000).unref();
+app.listen(env.port, () => logger.info('API listening', { url: `http://localhost:${env.port}`, origins: env.corsOrigins.join(',') }));

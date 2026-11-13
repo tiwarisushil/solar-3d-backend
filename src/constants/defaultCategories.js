@@ -1,0 +1,51 @@
+/**
+ * Default catalog categories for every new company (from AGRI MAX SOLAR SOLUTION), plus a dedicated
+ * poles category for the designer. Only `panels` and `poles` types are used in structure design; all others are `general`.
+ * Companies may add more categories and remove any except the designer panel and pole categories.
+ */
+export const DESIGNER_CATEGORY_TYPES = ['panels', 'poles'];
+
+export const DEFAULT_COMPANY_CATEGORIES = [
+  { name: 'Solar Panels', type: 'panels', description: 'Solar Panels' },
+  { name: 'Poles / pillars', type: 'poles', description: 'Mounting poles for structure design, priced per foot.' },
+  { name: 'Inverter', type: 'general', description: 'Solar Inverter' },
+  { name: 'Batteries', type: 'general', description: 'Solar Batteries' },
+  { name: 'Charge Controller', type: 'general', description: 'Charge Controller' },
+  { name: 'Mounting Structure & Rails', type: 'general', description: 'Frames that hold panels at the optimal angle.' },
+  { name: 'Mid Clamps', type: 'general', description: 'Aluminum clamps that secure panels to each other on the rails.' },
+  { name: 'End Clamps', type: 'general', description: 'Aluminum clamps that secure the outer edges.' },
+  { name: 'Roof Hooks / L-Feet', type: 'general', description: 'Structural brackets matching specific roof materials.' },
+  { name: 'Chemical Anchor Fasteners', type: 'general', description: 'Heavy-duty bolts to lock mounting legs into concrete.' },
+  { name: 'Ballast Blocks', type: 'general', description: 'Ballast Blocks: Heavy concrete weights for non-penetrating roof mounts.' },
+  { name: 'Solar DC Cables', type: 'general', description: 'Solar DC Cables: UV-stabilized, weather-resistant copper wiring.' },
+  { name: 'AC Cables', type: 'general', description: 'AC Cables: Standard electrical cables connecting the inverter to the building.' },
+  { name: 'Battery Interconnect Cables', type: 'general', description: 'Battery Interconnect Cables: High-gauge flexible cables for battery banks.' },
+  { name: 'MC4 Connectors', type: 'general', description: 'MC4 Connectors: Waterproof plug-and-play panel wire connectors' },
+  { name: 'Bi-Metallic Lugs & Terminals', type: 'general', description: 'Bi-Metallic Lugs & Terminals: Heavy crimp connectors for breakers and busbars.' },
+  { name: 'DC Distribution Box (DCDB)', type: 'general', description: 'DC Distribution Box (DCDB): Housing with DC fuses and surge protection.' },
+  { name: 'AC Distribution Box (ACDB)', type: 'general', description: 'AC Distribution Box (ACDB): Housing with AC breakers and surge protection.' },
+  { name: 'DC Isolator / Manual Disconnect Switch', type: 'general', description: 'DC Isolator / Manual Disconnect Switch: Switch to instantly cut off raw panel power' },
+  { name: 'Voltage Protection Relays', type: 'general', description: 'Voltage Protection Relays: Trips the system if grid voltage spikes dangerously.' },
+  { name: 'Net Meter / Smart Bi-Directional Meter', type: 'general', description: 'Net Meter / Smart Bi-Directional Meter: Utility meter tracking imported and exported power.' },
+  { name: 'Lightning Arrester (LA)', type: 'general', description: 'Lightning Arrester (LA): Metallic rod to intercept lightning strikes.' },
+  { name: 'Earthing/Grounding Rods', type: 'general', description: 'Earthing/Grounding Rods: Ground rods driven into earth to dissipate faults safely.' },
+  { name: 'Earthing Cables / GI Strips', type: 'general', description: 'Earthing Cables / GI Strips: Wires linking panels and boxes to ground rods.' },
+  { name: 'Earthing Chemical Compound', type: 'general', description: 'Earthing Chemical Compound: Soil additive to maintain low grounding resistance.' },
+  { name: 'Heavy-Duty PVC Conduits & Flexible Pipes', type: 'general', description: 'Heavy-Duty PVC Conduits & Flexible Pipes: UV-protected lines shielding outdoor wires.' },
+  { name: 'Perforated Cable Trays', type: 'general', description: 'Perforated Cable Trays: Metal channels supporting heavy rooftop bulk wiring.' },
+  { name: 'UV-Stabilized Nylon Cable Ties', type: 'general', description: 'UV-Stabilized Nylon Cable Ties: Sun-resistant zip ties to secure loose lines.' },
+  { name: 'Cable Glands & Entry Seals', type: 'general', description: 'Cable Glands & Entry Seals: Waterproof grommets for distribution box wire entries.' },
+  { name: 'Heat Shrink Sleeves & Insulation Tapes', type: 'general', description: 'Heat Shrink Sleeves & Insulation Tapes: Weather-proof insulation for wire joins.' },
+  { name: 'Silicon Sealant / PU Foam', type: 'general', description: 'Silicon Sealant / PU Foam: Waterproofing seal for roof anchor puncture holes.' },
+  { name: 'Solar Monitoring System', type: 'general', description: 'Solar Monitoring System: Wi-Fi or cellular logger streaming data to a mobile app.' },
+  { name: 'Solar PV Multimeter / Clamp Meter', type: 'general', description: 'Solar PV Multimeter / Clamp Meter: Safe high-capacity tester rated for high-voltage DC.' },
+  { name: 'Solar Radiation Meter (Pyranometer)', type: 'general', description: 'Solar Radiation Meter (Pyranometer): Handheld tool measuring real-time sunlight intensity.' },
+  { name: 'Thermal Imaging Camera', type: 'general', description: 'Thermal Imaging Camera: Infrared scanner to locate panel hot spots or cell damage.' },
+  { name: 'MC4 Crimping Tool Kit', type: 'general', description: 'MC4 Crimping Tool Kit: Ratcheting tool to secure pins onto solar wires.' },
+  { name: 'Cable Cutters & Wire Strippers', type: 'general', description: 'Cable Cutters & Wire Strippers: Clean-cutting hand tools for solar-gauge wire.' },
+  { name: 'Hammer Drill & Core Drilling Bits', type: 'general', description: 'Hammer Drill & Core Drilling Bits: Masonry drill for mounting foundation anchors.' },
+  { name: 'Torque Wrench', type: 'general', description: 'Torque Wrench: Calibrated wrench to tighten structural bolts to exact specifications.' },
+  { name: 'Solar Panel Cleaning Kit', type: 'general', description: 'Solar Panel Cleaning Kit: Telescopic microfiber wash poles for cleaning panels safely.' },
+  { name: 'Full-Body Safety Harness & Fall-Arrest Lanyards', type: 'general', description: 'Full-Body Safety Harness & Fall-Arrest Lanyards: Roof-work personal safety gear.' },
+  { name: 'Solar Warning Signs & Placards', type: 'general', description: 'Solar Warning Signs & Placards: Weatherproof stickers labeling high-voltage sections.' },
+];

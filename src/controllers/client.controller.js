@@ -1,0 +1,56 @@
+import * as clientService from '../services/client.service.js';
+import { clientOverview } from '../services/clientOverview.service.js';
+
+export async function list(req, res) {
+  res.json(
+    await clientService.listClients(req.company, req.user, {
+      page: req.query.page,
+      limit: req.query.limit,
+      q: req.query.q,
+      from: req.query.from,
+      to: req.query.to,
+    }),
+  );
+}
+
+export async function get(req, res) {
+  res.json(await clientService.getClientView(req.company, req.params.id));
+}
+
+export async function overview(req, res) {
+  res.json(await clientOverview(req.company, req.user, req.params.id));
+}
+
+export async function create(req, res) {
+  res.status(201).json(await clientService.createClient(req.company, req.user, req.body));
+}
+
+export async function update(req, res) {
+  res.json(await clientService.updateClient(req.company, req.params.id, req.body));
+}
+
+export async function remove(req, res) {
+  await clientService.deleteClient(req.company, req.params.id, req.user);
+  res.json({ ok: true });
+}
+
+export async function uploadDoc(req, res) {
+  if (!req.file) return res.status(400).json({ error: 'Please choose a file to upload' });
+  res.json({
+    name: req.file.originalname,
+    url: `/uploads/${req.file.filename}`,
+    size: req.file.size,
+    mimetype: req.file.mimetype,
+    uploadedAt: new Date(),
+  });
+}
+
+
+export async function createLogin(req, res) {
+  res.status(201).json(await clientService.provisionClientLogin(req.company, req.params.id));
+}
+
+export async function removeLogin(req, res) {
+  await clientService.removeClientLogin(req.company, req.params.id);
+  res.json({ ok: true });
+}

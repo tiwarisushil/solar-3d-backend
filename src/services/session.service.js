@@ -1,0 +1,157 @@
+import crypto from 'node:crypto';
+import { ROLES } from '../constants/index.js';
+import { AuthSession, User } from '../models/index.js';
+import { HttpError } from '../utils/HttpError.js';
+import { sessionExpiresAt } from '../utils/token.js';
+
+export const DEVICE_LIMIT_CODE = 'DEVICE_LIMIT';
+
+/** Branch owners (and company admins) may only have one active sign-in session at a time. */
+const MAX_DEVICES = 1;
+
+export function newSessionId() {
+  return crypto.randomUUID();
+}
+
+function deviceLabel(userAgent = '') {
+  const ua = String(userAgent);
+  if (/iPhone|iPad/i.test(ua)) return 'iPhone or iPad';
+  if (/Android/i.test(ua)) return 'Android device';
+  if (/Macintosh|Mac OS/i.test(ua)) return 'Mac';
+  if (/Windows/i.test(ua)) return 'Windows PC';
+  if (/Linux/i.test(ua)) return 'Linux device';
+  return ua.slice(0, 60) || 'Unknown device';
+}
+
+/**
+ * The plan's device limit covers the company's own (owner) sign-ins. Field agents have their own accounts and
+ * are exempt: they neither use up nor get blocked by the owner's devices.
+ */
+async function ownerSessionFilter(companyId) {
+  const owners = await User.find({ company: companyId, role: ROLES.BRANCH }).distinct('_id');
+  return { company: companyId, user: { $in: owners } };
+}
+
+async function purgeExpiredForCompany(companyId) {
+  const now = new Date();
+  await AuthSession.deleteMany({
+    company: companyId,
+    $or: [{ expiresAt: { $lte: now } }, { expiresAt: null }, { expiresAt: { $exists: false } }],
+  });
+}
+
+export async function listActiveCompanySessions(companyId) {
+  await purgeExpiredForCompany(companyId);
+  const rows = await AuthSession.find({ ...(await ownerSessionFilter(companyId)), expiresAt: { $gt: new Date() } })
+    .sort({ lastActiveAt: -1 })
+    .populate('user', 'name email role')
+    .limit(20);
+  return rows.map((s) => ({
+    sessionId: s.sessionId,
+    userName: s.user?.name || s.user?.email || 'User',
+    userEmail: s.user?.email || '',
+    role: s.user?.role || '',
+    device: deviceLabel(s.userAgent),
+    lastActiveAt: s.lastActiveAt,
+  }));
+}
+
+/** `company` is null for platform-admin sessions and for an admin's impersonation of a company (2 hours). */
+export async function registerSession({ user, company = null, sessionId, userAgent, impersonation = false }) {
+  await AuthSession.create({
+    user: user._id,
+    company: company?._id || null,
+    sessionId,
+    userAgent: userAgent?.slice(0, 300) || '',
+    lastActiveAt: new Date(),
+    expiresAt: sessionExpiresAt({ impersonation }),
+  });
+}
+
+/** Sign one user out everywhere (used when their password changes or is reset). */
+export async function revokeUserSessions(userId) {
+  await AuthSession.deleteMany({ user: userId });
+}
+
+/** Returns false if the session id is unknown or expired. */
+export async function validateSession(sessionId) {
+  if (!sessionId) return false;
+  const row = await AuthSession.findOneAndUpdate(
+    { sessionId, expiresAt: { $gt: new Date() } },
+    { $set: { lastActiveAt: new Date() } },
+  );
+  return Boolean(row);
+}
+
+export async function revokeSession(sessionId) {
+  if (!sessionId) return;
+  await AuthSession.deleteOne({ sessionId });
+}
+
+/** Sign out every device for this company (used after password check on the sign-in page). */
+export async function revokeAllCompanySessions(companyId) {
+  await AuthSession.deleteMany(await ownerSessionFilter(companyId));
+}
+
+/**
+ * Call right after registering an owner's session: two sign-ins can pass assertConcurrentLoginAllowed together, so
+ * re-count and, if the plan's device limit was passed, remove this session and refuse it.
+ */
+export async function confirmWithinDeviceLimit(company, sessionId) {
+  const max = MAX_DEVICES;
+  const active = await AuthSession.countDocuments({ ...(await ownerSessionFilter(company._id)), expiresAt: { $gt: new Date() } });
+  if (active > max) {
+    await AuthSession.deleteOne({ sessionId });
+    throw new HttpError(403, 'Another device is already signed in. Sign out there first, then try again.', DEVICE_LIMIT_CODE, { max, active: active - 1, sessions: await listActiveCompanySessions(company._id) });
+  }
+}
+
+/** One person's own active sessions (the company admin's devices), for the device-limit dialog. */
+async function listUserSessions(userId) {
+  const rows = await AuthSession.find({ user: userId, expiresAt: { $gt: new Date() } }).sort({ lastActiveAt: -1 }).populate('user', 'name email role').limit(20);
+  return rows.map((s) => ({ sessionId: s.sessionId, userName: s.user?.name || s.user?.email || 'User', userEmail: s.user?.email || '', role: s.user?.role || '', device: deviceLabel(s.userAgent), lastActiveAt: s.lastActiveAt }));
+}
+
+/**
+ * The company admin signs in to the whole organization, not to one branch: their own devices count against the
+ * organization's sign-in total and never against a branch's (and making room only signs out their own devices -
+ * never a branch owner's).
+ */
+const adminLimit = () => MAX_DEVICES;
+const deviceLimitError = (max, active, sessions) => new HttpError(
+  403,
+  'Another device is already signed in. Sign out there first, then try again.',
+  DEVICE_LIMIT_CODE,
+  { max, active, sessions },
+);
+
+export async function assertAdminLoginAllowed(user, organization) {
+  const max = adminLimit();
+  const active = await AuthSession.countDocuments({ user: user._id, expiresAt: { $gt: new Date() } });
+  if (active >= max) throw deviceLimitError(max, active, await listUserSessions(user._id));
+}
+
+/** After registering the admin's session: two sign-ins at once can both pass the check above, so re-count. */
+export async function confirmAdminWithinLimit(user, organization, sessionId) {
+  const max = adminLimit();
+  const active = await AuthSession.countDocuments({ user: user._id, expiresAt: { $gt: new Date() } });
+  if (active > max) {
+    await AuthSession.deleteOne({ sessionId });
+    throw deviceLimitError(max, active - 1, await listUserSessions(user._id));
+  }
+}
+
+export async function assertConcurrentLoginAllowed(company) {
+  const max = MAX_DEVICES;
+  await purgeExpiredForCompany(company._id);
+  const active = await AuthSession.countDocuments({ ...(await ownerSessionFilter(company._id)), expiresAt: { $gt: new Date() } });
+  if (active >= max) {
+    const sessions = await listActiveCompanySessions(company._id);
+    throw new HttpError(
+      403,
+      'Another device is already signed in. Sign out there first, then try again.',
+      DEVICE_LIMIT_CODE,
+      { max, active, sessions },
+    );
+  }
+}
