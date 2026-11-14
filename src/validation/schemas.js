@@ -618,3 +618,18 @@ export const freeProposalUpdateSchema = obj({
   status: z.enum(['new', 'contacted', 'converted', 'closed']).optional(),
   adminNotes: f.textOptional(2000, 'Notes'),
 });
+
+/* ───────────── contact messages (public landing Contact Us form) ───────────── */
+
+export const contactMessageCreateSchema = obj({
+  name: f.personNameRequired,
+  email: f.emailRequired,
+  phone: f.textRequired(20, 'Mobile number'),
+  company: f.textOptional(160, 'Company'),
+  message: f.textRequired(4000, 'Message'),
+});
+
+export const contactMessageUpdateSchema = obj({
+  status: z.enum(['new', 'contacted', 'closed']).optional(),
+  adminNotes: f.textOptional(2000, 'Notes'),
+});

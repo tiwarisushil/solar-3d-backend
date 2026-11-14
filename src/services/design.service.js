@@ -52,10 +52,20 @@ async function ownClient(company, id) {
 }
 
 /** Lists leave out the heavy `data`. Optional `from`/`to` (`YYYY-MM-DD`) filter on `createdAt`; `show` is a dashboard preset (listPresets.js). */
-export async function listDesigns(company, { client, page, limit, from, to, show, installable = false } = {}) {
+export async function listDesigns(company, { client, page, limit, from, to, show, status, q, installable = false } = {}) {
   const match = { company: company._id };
   if (client) match.client = new mongoose.Types.ObjectId(objectId(client, 'Client'));
   Object.assign(match, dateRangeOnField('createdAt', from, to) || {}, (await designShowMatch(company, show)) || {});
+  if (status && status !== 'all') match.status = String(status);
+  // free-text search over proposal name, number, client name and address (case-insensitive, after the client lookup)
+  const term = String(q || '').trim();
+  const searchMatch = term
+    ? {
+        $or: ['name', 'proposalNo', 'client.name', 'summary.address'].map((field) => ({
+          [field]: { $regex: term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' },
+        })),
+      }
+    : null;
   // ?installable=1 : booked proposals that have no installation yet (the "Start installation" picker)
   if (installable) {
     match.status = 'won';
@@ -75,6 +85,7 @@ export async function listDesigns(company, { client, page, limit, from, to, show
       },
     },
     { $unwind: { path: '$client', preserveNullAndEmptyArrays: true } },
+    ...(searchMatch ? [{ $match: searchMatch }] : []),
     { $project: { data: 0 } },
     {
       $facet: {

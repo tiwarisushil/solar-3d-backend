@@ -29,6 +29,26 @@ function scheduleCondition(value, now = new Date()) {
 }
 
 /**
+ * Mongo conditions on `scheduledAt` for a list request: the schedule type (?schedule=) plus, when the status asks
+ * for a date, the date range (?scheduleFrom= & ?scheduleTo=, yyyy-mm-dd, both ends inclusive).
+ */
+function scheduleFilterCondition(query = {}, now = new Date()) {
+  const cond = { ...(scheduleCondition(query.schedule, now) || {}) };
+  // yyyy-mm-dd read as the server's local day (not UTC), so the range matches what the user picked
+  const day = (s) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+    return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  };
+  const from = day(query.scheduleFrom);
+  const to = day(query.scheduleTo);
+  const range = {};
+  if (from) range.$gte = from;
+  if (to) range.$lte = new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59, 999);
+  if (Object.keys(range).length) cond.scheduledAt = { ...(cond.scheduledAt || {}), ...range };
+  return cond;
+}
+
+/**
  * A reschedule: the lead already had a date and the status change books a different one. Returns the `$set` / `$push`
  * pieces to merge into the status update (the earlier date is kept in previousSchedules, rescheduledCount goes up).
  */
@@ -51,4 +71,4 @@ function statusLogEntry({ status, scheduledAt, remark = '', rescheduled = false,
   return { action: rescheduled ? 'lead_rescheduled' : 'lead_status', message: parts.join(' · '), byName, at };
 }
 
-module.exports = { readScheduledAt, scheduleCondition, rescheduleUpdate, statusLogEntry };
+module.exports = { readScheduledAt, scheduleCondition, scheduleFilterCondition, rescheduleUpdate, statusLogEntry };

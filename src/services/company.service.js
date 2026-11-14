@@ -12,6 +12,8 @@ import { badRequest, conflict, forbidden, notFound } from '../utils/HttpError.js
 import { hashPassword } from '../utils/password.js';
 import { pick } from '../utils/pick.js';
 import { capFirst } from '../utils/text.js';
+import { parsePagination } from '../utils/lean.js';
+import { escapeRe } from '../utils/listFilters.js';
 import { cleanRichText } from '../utils/richText.js';
 import { signToken } from '../utils/token.js';
 import { email as validEmail, objectId, password as validPassword } from '../utils/validators.js';
@@ -162,6 +164,37 @@ export async function listCompanies(filter = {}) {
   });
 }
 
+/**
+ * One page of companies, filtered in the database before paging. `q` matches company name, email or phone, the login email of
+ * its users, or its organization name. `status` is 'active' or 'suspended'.
+ */
+export async function listCompaniesPage({ page, limit, q, status } = {}) {
+  const { page: p, limit: l, skip } = parsePagination({ page, limit }, { defaultLimit: 10, maxLimit: 100 });
+  const filter = {};
+  if (status === 'active' || status === 'suspended') filter.status = status;
+  const term = String(q || '').trim();
+  if (term) {
+    const re = { $regex: escapeRe(term), $options: 'i' };
+    const [users, orgs] = await Promise.all([
+      User.find({ email: re }).select('company organization').lean(),
+      Organization.find({ name: re }).select('_id').lean(),
+    ]);
+    filter.$or = [
+      { name: re },
+      { email: re },
+      { phone: re },
+      { _id: { $in: users.map((u) => u.company).filter(Boolean) } },
+      { organization: { $in: [...users.map((u) => u.organization).filter(Boolean), ...orgs.map((o) => o._id)] } },
+    ];
+  }
+  const [total, ids] = await Promise.all([
+    Company.countDocuments(filter),
+    Company.find(filter).sort({ createdAt: -1 }).skip(skip).limit(l).select('_id').lean(),
+  ]);
+  const byId = new Map((await listCompanies({ _id: { $in: ids.map((c) => c._id) } })).map((c) => [c.id, c]));
+  return { items: ids.map((c) => byId.get(String(c._id))).filter(Boolean), total, page: p, limit: l };
+}
+
 const describe = async (company) => (await listCompanies({ _id: company._id }))[0];
 
 export async function platformStats() {
@@ -199,11 +232,6 @@ export async function updateCompanyAsAdmin(id, body) {
   // company-wide caps, counted across every branch together; never below what the company already holds
   const maxClients = org ? changed(body?.limits?.maxClients, org.limits?.maxClients) : null;
   const maxDesigns = org ? changed(body?.limits?.maxDesigns, org.limits?.maxDesigns) : null;
-  if (org && (maxClients != null || maxDesigns != null)) {
-    const usage = await usageOf(company);
-    if (maxClients != null && maxClients < usage.clients) throw badRequest(`This company already has ${usage.clients} clients across its branches; the limit can’t be lower.`);
-    if (maxDesigns != null && maxDesigns < usage.designs) throw badRequest(`This company already has ${usage.designs} designs across its branches; the limit can’t be lower.`);
-  }
   if (withBranches) {
     const branches = await Company.find({ organization: org._id }).select('limits').lean();
     const held = branches.reduce((a, b) => a + (Number(b.limits?.maxConcurrentLogins) || 0), 0);
@@ -212,17 +240,26 @@ export async function updateCompanyAsAdmin(id, body) {
   }
 
   applyAdminFields(company, { ...body, limits: withBranches ? undefined : body?.limits });
+  const prevPlanId = String(company.planRef || '');
   const plan = body?.planId ? await assignPlanAsAdmin(company, body.planId, { limits: company.limits }) : null;
+  // the company-wide caps this save leaves: a plan change sets them from the plan (typed numbers win); otherwise only typed numbers change them
+  const planChanged = Boolean(plan) && String(plan._id) !== prevPlanId;
+  if (org) {
+    const usage = await usageOf(company);
+    const nextClients = planChanged ? (body?.limits?.maxClients != null ? whole(body.limits.maxClients) : plan.maxClients) : (maxClients ?? org.limits?.maxClients);
+    const nextDesigns = planChanged ? (body?.limits?.maxDesigns != null ? whole(body.limits.maxDesigns) : plan.maxDesigns) : (maxDesigns ?? org.limits?.maxDesigns);
+    if (nextClients != null && nextClients < usage.clients) throw badRequest(`This company already has ${usage.clients} clients across its branches; the limit can’t be lower.`);
+    if (nextDesigns != null && nextDesigns < usage.designs) throw badRequest(`This company already has ${usage.designs} designs across its branches; the limit can’t be lower.`);
+  }
   await ensureCompanySubscription(company);
   await company.save();
   // feature switches are shared by the whole company (read from the organization)
   if (org && body?.features) Object.assign(org.features, pick(body.features, ['pdfBranding', 'excelImport']));
   // moving to a plan sets the company-wide caps from it (never below what the company already holds); numbers typed in the same save win
-  if (org && plan) {
-    applyPlanToOrganization(org, plan);
-    const [usage, held] = [await usageOf(company), await Company.countDocuments({ organization: org._id })];
-    org.limits.maxClients = Math.max(org.limits.maxClients, usage.clients);
-    org.limits.maxDesigns = Math.max(org.limits.maxDesigns, usage.designs);
+  if (org && planChanged) {
+    // typed numbers override the plan's defaults; untyped caps come from the plan
+    applyPlanToOrganization(org, plan, { maxClients: body?.limits?.maxClients, maxDesigns: body?.limits?.maxDesigns });
+    const held = await Company.countDocuments({ organization: org._id });
     org.limits.maxBranches = Math.max(org.limits.maxBranches, held);
   }
   if (org && (logins != null || maxBranches != null || maxClients != null || maxDesigns != null || plan || body?.features)) {

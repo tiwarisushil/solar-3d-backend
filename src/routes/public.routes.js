@@ -4,6 +4,9 @@ import * as google from '../controllers/google.controller.js';
 import * as doc from '../controllers/publicDocument.controller.js';
 import * as pub from '../services/public.service.js';
 import * as free from '../services/freeProposal.service.js';
+import * as contact from '../services/contactMessage.service.js';
+import { validate } from '../middlewares/validate.middleware.js';
+import * as S from '../validation/schemas.js';
 import { rateLimit } from '../middlewares/rateLimit.middleware.js';
 
 
@@ -27,6 +30,9 @@ router.post('/free-proposals', rateLimit({ name: 'free-proposal', windowMs: 60 *
 // the visitor keeps editing the proposal they hold the link of (each change of design or wording saves it again)
 router.put('/free-proposals/:token', rateLimit({ name: 'free-proposal-edit', windowMs: 60 * 60 * 1000, max: 120, by: 'ip' }), wrap((req) => free.updateFreeProposal(req.params.token, req.body, visitor(req))));
 router.get('/free-proposals/:token', wrap((req) => free.getFreeProposal(req.params.token)));
+
+// Contact Us on the public landing page: saved as a lead for the platform admin
+router.post('/contact-messages', rateLimit({ name: 'contact-message', windowMs: 60 * 60 * 1000, max: 10, by: 'ip' }), validate(S.contactMessageCreateSchema), wrap((req) => contact.createContactMessage(req.body, visitor(req))));
 
 // the 3D ground texture: <img>/WebGL cannot send headers, so the share token rides in the query
 router.get('/staticmap', async (req, res, next) => {

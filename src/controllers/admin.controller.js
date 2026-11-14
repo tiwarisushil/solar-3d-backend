@@ -1,4 +1,5 @@
 import { countNewFreeProposals } from '../services/freeProposal.service.js';
+import { countNewContactMessages } from '../services/contactMessage.service.js';
 // Super admin: manage every company on the platform.
 import { Company, Plan, PlanRequest } from '../models/index.js';
 import * as companyService from '../services/company.service.js';
@@ -10,12 +11,14 @@ export async function stats(req, res) {
 
 /** The numbers beside the admin sidebar links. `planRequests` counts only the ones waiting for a decision. */
 export async function counts(req, res) {
-  const [companies, plans, planRequests, freeProposals] = await Promise.all([Company.countDocuments({}), Plan.countDocuments({}), PlanRequest.countDocuments({ status: 'pending' }), countNewFreeProposals()]);
-  res.json({ companies, plans, planRequests, freeProposals });
+  const [companies, plans, planRequests, freeProposals, contactMessages] = await Promise.all([Company.countDocuments({}), Plan.countDocuments({}), PlanRequest.countDocuments({ status: 'pending' }), countNewFreeProposals(), countNewContactMessages()]);
+  res.json({ companies, plans, planRequests, freeProposals, contactMessages });
 }
 
 export async function listCompanies(req, res) {
-  res.json(await companyService.listCompanies());
+  // with ?page= the list is paged and filtered on the server; without it the full array (the Overview counts use that)
+  if (req.query.page === undefined) return res.json(await companyService.listCompanies());
+  res.json(await companyService.listCompaniesPage(req.query));
 }
 
 export async function createCompany(req, res) {

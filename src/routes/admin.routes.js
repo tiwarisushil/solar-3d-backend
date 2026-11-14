@@ -5,6 +5,7 @@ import * as S from '../validation/schemas.js';
 import * as plans from '../controllers/plan.controller.js';
 import * as planRequests from '../controllers/planRequest.controller.js';
 import * as free from '../services/freeProposal.service.js';
+import * as contact from '../services/contactMessage.service.js';
 import { wrap } from '../utils/wrap.js';
 
 const router = Router();
@@ -23,6 +24,12 @@ router.get('/free-proposals', wrap(() => free.listFreeProposals()));
 router.get('/free-proposals/:id', wrap((req) => free.adminGetFreeProposal(req.params.id)));
 router.patch('/free-proposals/:id', validate(S.freeProposalUpdateSchema), wrap((req) => free.adminUpdateFreeProposal(req.params.id, req.body)));
 router.delete('/free-proposals/:id', wrap((req) => free.removeFreeProposal(req.params.id)));
+
+// Contact Us messages from the public landing page
+router.get('/contact-messages', wrap(() => contact.listContactMessages()));
+router.get('/contact-messages/:id', wrap((req) => contact.getContactMessage(req.params.id)));
+router.patch('/contact-messages/:id', validate(S.contactMessageUpdateSchema), wrap((req) => contact.updateContactMessage(req.params.id, req.body)));
+router.delete('/contact-messages/:id', wrap((req) => contact.removeContactMessage(req.params.id)));
 
 router.get('/stats', admin.stats);
 router.get('/counts', admin.counts);

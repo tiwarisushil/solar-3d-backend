@@ -9,7 +9,7 @@ const { leadCompanyFilter } = require('../utils/tenant');
 const { withAssignedScope } = require('../utils/leadScope');
 const { applyLeadSearch } = require('../utils/leadSearch');
 const { readPriorityFilter, priorityCondition } = require('../utils/leadPriority');
-const { scheduleCondition } = require('../utils/leadSchedule');
+const { scheduleCondition, scheduleFilterCondition } = require('../utils/leadSchedule');
 const { heldByCondition } = require('../utils/leadAssignment');
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -93,7 +93,7 @@ async function loadMetaChunk(req, limit, statusId) {
   const { priority, invalid } = readPriorityFilter(req.query.priority);
   if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
   if (priority !== null) filter.isPriority = priorityCondition(priority);
-  Object.assign(filter, scheduleCondition(req.query.schedule) || {});
+  Object.assign(filter, scheduleFilterCondition(req.query));
   const pageId = text(req.query.pageId);
   const formId = text(req.query.formId);
   if (pageId) filter.pageId = pageId;
@@ -147,7 +147,7 @@ async function loadGoogleChunk(req, limit, statusId) {
   const { priority, invalid } = readPriorityFilter(req.query.priority);
   if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
   if (priority !== null) filter.isPriority = priorityCondition(priority);
-  Object.assign(filter, scheduleCondition(req.query.schedule) || {});
+  Object.assign(filter, scheduleFilterCondition(req.query));
   const from = text(req.query.from || req.query.fromDate);
   const to = text(req.query.to || req.query.toDate);
   if (from && !Number.isNaN(Date.parse(from))) filter.createdAt = { ...(filter.createdAt || {}), $gte: new Date(from) };
@@ -191,7 +191,7 @@ async function loadManualChunk(req, limit, statusId, manualSource) {
   const { priority, invalid } = readPriorityFilter(req.query.priority);
   if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
   if (priority !== null) filter.isPriority = priorityCondition(priority);
-  Object.assign(filter, scheduleCondition(req.query.schedule) || {});
+  Object.assign(filter, scheduleFilterCondition(req.query));
   const from = text(req.query.from || req.query.fromDate);
   const to = text(req.query.to || req.query.toDate);
   if (from && !Number.isNaN(Date.parse(from))) filter.createdAt = { ...(filter.createdAt || {}), $gte: new Date(from) };

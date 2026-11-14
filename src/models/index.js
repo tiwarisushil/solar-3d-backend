@@ -34,3 +34,4 @@ export { EmailLog } from './emailLog.model.js';
 export { Ticket } from './ticket.model.js';
 export { ClientTicket } from './clientTicket.model.js';
 export { FreeProposal } from './freeProposal.model.js';
+export { ContactMessage } from './contactMessage.model.js';

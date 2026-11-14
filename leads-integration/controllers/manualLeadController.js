@@ -4,7 +4,7 @@ const ManualLead = require('../models/ManualLead');
 const MetaLeadStatus = require('../models/MetaLeadStatus');
 const { buildSearchText } = require('../utils/leadSearchText');
 const { readPriorityFilter, priorityCondition } = require('../utils/leadPriority');
-const { readScheduledAt, scheduleCondition, rescheduleUpdate, statusLogEntry } = require('../utils/leadSchedule');
+const { readScheduledAt, scheduleCondition, scheduleFilterCondition, rescheduleUpdate, statusLogEntry } = require('../utils/leadSchedule');
 const { applyLeadAssignments, heldByCondition } = require('../utils/leadAssignment');
 const { leadCompanyFilter, companyObjectId } = require('../utils/tenant');
 const { assignedWriteScope, withAssignedScope } = require('../utils/leadScope');
@@ -112,7 +112,7 @@ const listManualLeads = async (req, res) => {
     const { priority, invalid: badPriority } = readPriorityFilter(req.query.priority);
     if (badPriority) return res.status(400).json({ message: 'Invalid filter' });
     if (priority !== null) filter.isPriority = priorityCondition(priority);
-    Object.assign(filter, scheduleCondition(req.query.schedule) || {});
+    Object.assign(filter, scheduleFilterCondition(req.query));
     const from = text(req.query.from);
     const to = text(req.query.to);
     if ((from && !Number.isNaN(Date.parse(from))) || (to && !Number.isNaN(Date.parse(to)))) {
