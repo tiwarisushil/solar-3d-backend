@@ -3,7 +3,7 @@
 import { ContactMessage } from '../models/index.js';
 import { CONTACT_MESSAGE_STATUS } from '../models/contactMessage.model.js';
 import { badRequest, notFound } from '../utils/HttpError.js';
-import { toApiJSON, toApiJSONList } from '../utils/lean.js';
+import { parsePagination, toApiJSON, toApiJSONList } from '../utils/lean.js';
 import { objectId } from '../utils/validators.js';
 
 const clip = (v, max) => String(v ?? '').trim().slice(0, max);
@@ -34,8 +34,16 @@ export async function createContactMessage(body = {}, meta = {}) {
   return toApiJSON(doc.toObject());
 }
 
-export async function listContactMessages() {
-  return toApiJSONList(await ContactMessage.find({}).sort({ createdAt: -1 }).limit(1000).lean());
+/** One page of contact messages for the admin console. Optional `status` filter. */
+export async function listContactMessages({ page, limit, status } = {}) {
+  const { page: p, limit: l, skip } = parsePagination({ page, limit }, { defaultLimit: 20, maxLimit: 100 });
+  const filter = {};
+  if (status && CONTACT_MESSAGE_STATUS.includes(status)) filter.status = status;
+  const [total, rows] = await Promise.all([
+    ContactMessage.countDocuments(filter),
+    ContactMessage.find(filter).sort({ createdAt: -1 }).skip(skip).limit(l).lean(),
+  ]);
+  return { items: toApiJSONList(rows), total, page: p, limit: l };
 }
 
 export async function getContactMessage(id) {

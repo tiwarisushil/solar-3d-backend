@@ -20,13 +20,13 @@ router.post('/plan-requests/:id/approve', validate(S.planRequestApproveSchema), 
 router.post('/plan-requests/:id/reject', validate(S.planRequestRejectSchema), planRequests.adminReject);
 
 // free proposals made by visitors on the public site: the platform's own leads
-router.get('/free-proposals', wrap(() => free.listFreeProposals()));
+router.get('/free-proposals', wrap((req) => free.listFreeProposals(req.query)));
 router.get('/free-proposals/:id', wrap((req) => free.adminGetFreeProposal(req.params.id)));
 router.patch('/free-proposals/:id', validate(S.freeProposalUpdateSchema), wrap((req) => free.adminUpdateFreeProposal(req.params.id, req.body)));
 router.delete('/free-proposals/:id', wrap((req) => free.removeFreeProposal(req.params.id)));
 
 // Contact Us messages from the public landing page
-router.get('/contact-messages', wrap(() => contact.listContactMessages()));
+router.get('/contact-messages', wrap((req) => contact.listContactMessages(req.query)));
 router.get('/contact-messages/:id', wrap((req) => contact.getContactMessage(req.params.id)));
 router.patch('/contact-messages/:id', validate(S.contactMessageUpdateSchema), wrap((req) => contact.updateContactMessage(req.params.id, req.body)));
 router.delete('/contact-messages/:id', wrap((req) => contact.removeContactMessage(req.params.id)));

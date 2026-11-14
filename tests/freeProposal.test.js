@@ -61,7 +61,7 @@ test('a proposal is kept as a lead with device and location; the visitor gets on
   assert.equal((await getFreeProposal(made.token)).data.client.name, 'Ravi Kumar');
   await assert.rejects(() => getFreeProposal('nope-nope-nope'), /not found/);
 
-  const [row] = await listFreeProposals();
+  const { items: [row] } = await listFreeProposals();
   assert.deepEqual([row.companyName, row.contactName, row.email, row.clientName, row.logo], ['Sunrise Solar', 'Asha Rao', 'asha@example.com', 'Ravi Kumar', undefined]);
   assert.deepEqual([row.device.browser, row.device.os, row.device.type, row.device.screen], ['Safari', 'iOS', 'mobile', '390x844']);
   assert.deepEqual([row.location.ip, row.location.timezone, row.location.lat, row.location.lng], ['203.0.113.9', 'Asia/Kolkata', 18.52, 73.85]);

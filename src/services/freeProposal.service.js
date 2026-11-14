@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { FreeProposal } from '../models/index.js';
 import { FREE_PROPOSAL_STATUS } from '../models/freeProposal.model.js';
 import { badRequest, notFound } from '../utils/HttpError.js';
-import { toApiJSON, toApiJSONList } from '../utils/lean.js';
+import { parsePagination, toApiJSON, toApiJSONList } from '../utils/lean.js';
 import { cleanRichText } from '../utils/richText.js';
 import { objectId } from '../utils/validators.js';
 
@@ -191,9 +191,16 @@ export async function getFreeProposal(token) {
 
 /* ───────────── platform admin ───────────── */
 
-/** Every free proposal, newest first. The list leaves the logo out (it is heavy); one proposal carries it. */
-export async function listFreeProposals() {
-  return toApiJSONList(await FreeProposal.find({}).select('-logo').sort({ createdAt: -1 }).limit(1000).lean());
+/** One page of free proposals for the admin console, newest first. Logo left out of the list (heavy); open one to see it. */
+export async function listFreeProposals({ page, limit, status } = {}) {
+  const { page: p, limit: l, skip } = parsePagination({ page, limit }, { defaultLimit: 20, maxLimit: 100 });
+  const filter = {};
+  if (status && FREE_PROPOSAL_STATUS.includes(status)) filter.status = status;
+  const [total, rows] = await Promise.all([
+    FreeProposal.countDocuments(filter),
+    FreeProposal.find(filter).select('-logo').sort({ createdAt: -1 }).skip(skip).limit(l).lean(),
+  ]);
+  return { items: toApiJSONList(rows), total, page: p, limit: l };
 }
 
 export async function adminGetFreeProposal(id) {
