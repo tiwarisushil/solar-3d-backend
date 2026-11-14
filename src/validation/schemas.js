@@ -105,6 +105,7 @@ const companyProfile = {
   name: f.orgNameRequired,
   email: f.emailOptional,
   phone: f.phoneOptional,
+  alternatePhone: f.phoneOptional,
   address: f.textOptional(400, 'Address'),
   website: f.websiteOptional,
   taxId: f.gstinOptional,
@@ -154,7 +155,7 @@ export const catalogSettingsSchema = obj({
   taxRate: f.num({ min: 0, max: 100, label: 'Tax rate' }).optional(),
   tariff: f.num({ min: 0, max: 1000, label: 'Tariff' }).optional(),
   otherCostPerKw: f.num({ min: 0, max: 1e7, label: 'Other cost per kW' }).optional(),
-  productUnits: strArray(30, 20).optional(),
+  productUnits: strArray(60, 20).optional(),
 }).partial();
 
 const limits = obj({

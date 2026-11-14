@@ -151,12 +151,20 @@ function cleanQuote(q = {}) {
     price: Math.max(0, Number(it?.price) || 0),
   })).filter((it) => it.name);
   return {
+    pricingMode: q.pricingMode === 'custom' ? 'custom' : 'package',
+    packageId: String(q.packageId || '').slice(0, 64),
+    packagePrice: Math.max(0, Number(q.packagePrice) || 0),
     items,
     withGst: q.withGst !== false,
     gstIncluded: q.gstIncluded !== false,
     gstPercent: Math.max(0, Math.min(100, Number(q.gstPercent ?? 18) || 0)),
+    discount: Math.max(0, Number(q.discount) || 0),
+    discountIsPercent: Boolean(q.discountIsPercent),
+    discountRemark: String(q.discountRemark || '').trim().slice(0, 200),
     floorPlacement: Math.max(0, Math.min(5, Math.round(Number(q.floorPlacement) || 0))),
     floorCost: Math.max(0, Number(q.floorCost) || 0),
+    outlookYears: Math.max(1, Math.min(30, Math.round(Number(q.outlookYears) || 10))),
+    tariff: Math.max(0, Number(q.tariff) || 0),
     installationCharges: cleanCharges(q.installationCharges),
   };
 }

@@ -16,8 +16,8 @@ const body = (extra = {}) => ({
   company: { name: 'Sunrise Solar', contactName: 'Asha Rao', phone: '98765 43210', email: 'ASHA@example.com' },
   client: { name: 'Ravi Kumar', address: 'Camp, Pune' },
   system: { title: '5 kW rooftop solar', type: 'On-grid', kw: 5, panelCount: 9, panelWatts: 550, annualKwh: 7000, tariff: 8 },
-  items: [{ name: 'Solar panels', qty: 9, unit: 'Nos', rate: 15000, taxPercent: 12 }, { name: 'Installation', qty: 1, rate: 20000, taxPercent: 18 }, { name: '', qty: 3, rate: 5 }],
-  pricing: { currency: 'INR', discount: 10, discountIsPercent: true, subsidy: 78000 },
+  items: [{ name: 'Solar panels', qty: 9, unit: 'Nos', rate: 15000 }, { name: 'Installation', qty: 1, rate: 20000 }, { name: '', qty: 3, rate: 5 }],
+  pricing: { currency: 'INR', discount: 10, discountIsPercent: true, taxType: 'GST', taxPercent: 18, subsidy: 78000 },
   terms: { validUntil: '2026-12-31', payment: '50% advance' },
   design: { cover: 'panel', primary: '#0F6E56' },
   logo: LOGO,
@@ -25,9 +25,11 @@ const body = (extra = {}) => ({
 });
 
 test('the amounts are worked out from quantity, rate, discount and tax', () => {
-  // 9 × 15000 = 135000 and 1 × 20000 → 155000; 10% off → 139500; tax 12% of 121500 + 18% of 18000
-  assert.deepEqual(proposalTotals(body().items.slice(0, 2), body().pricing), { subtotal: 155000, discountAmount: 15500, taxable: 139500, tax: 17820, total: 157320, subsidy: 78000, net: 79320 });
+  // 9 × 15000 = 135000 and 1 × 20000 → 155000; 10% off → 139500; GST 18% of 139500 → 25110
+  assert.deepEqual(proposalTotals(body().items.slice(0, 2), body().pricing), { subtotal: 155000, discountAmount: 15500, taxable: 139500, tax: 25110, total: 164610, subsidy: 78000, net: 86610 });
   assert.equal(proposalTotals([{ qty: 2, rate: 50 }], { discount: 500 }).total, 0); // a discount never goes past the price
+  // legacy drafts without a tax type still use each line’s own tax %
+  assert.equal(proposalTotals([{ qty: 1, rate: 100, taxPercent: 10 }], {}).tax, 10);
 });
 
 test('only what the maker asks for is kept, and what it needs is asked for', () => {
@@ -42,7 +44,7 @@ test('only what the maker asks for is kept, and what it needs is asked for', () 
   assert.throws(() => cleanProposal(body({ company: { name: 'S' } })), /company name/);
   assert.throws(() => cleanProposal(body({ client: {} })), /client/);
   assert.throws(() => cleanProposal(body({ system: { kw: 0 } })), /size of the system/);
-  assert.throws(() => cleanProposal(body({ items: [] })), /at least one item/);
+  assert.throws(() => cleanProposal(body({ items: [] })), /at least one product or service/);
   assert.throws(() => cleanProposal(body({ items: [{ name: 'Panel', qty: 0, rate: 5 }] })), /quantity of Panel/);
 });
 
@@ -53,7 +55,7 @@ test('the device is read from the user agent', () => {
 test('a proposal is kept as a lead with device and location; the visitor gets only their own part and can edit it', async () => {
   const made = await createFreeProposal({ ...body(), device: { screen: '390x844', language: 'en-IN', timezone: 'Asia/Kolkata', platform: 'iPhone' }, position: { lat: 18.52, lng: 73.85, accuracy: 30 } }, { ip: '203.0.113.9', userAgent: IPHONE, referrer: 'https://example.com/' });
   assert.match(made.refNo, /^FP-\d{6}-[0-9A-F]{4}$/);
-  assert.equal(made.totals.total, 157320);
+  assert.equal(made.totals.total, 164610);
   assert.equal(made.device, undefined);
   assert.equal(made.location, undefined);
   assert.equal((await getFreeProposal(made.token)).data.client.name, 'Ravi Kumar');

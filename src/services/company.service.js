@@ -29,11 +29,11 @@ import { deleteClientTicketsForCompany } from './clientTicket.service.js';
 import { leadForm } from '../integrations/leads.js';
 
 
-const PROFILE = ['name', 'email', 'phone', 'address', 'website', 'taxId', 'pan'];
+const PROFILE = ['name', 'email', 'phone', 'alternatePhone', 'address', 'website', 'taxId', 'pan'];
 const ADMIN_CONTROLS = ['status', 'notes'];
 const BANK = ['bankAccountName', 'bankName', 'bankAccountNumber', 'bankIfsc', 'bankBranch', 'bankAccountType', 'upiId', 'paymentQrLabel'];
 const SELF_EDITABLE = [...PROFILE, 'signatoryName', 'signatoryTitle', 'qrLabel', ...BANK, 'tagline', 'pdfTerms', 'currency', 'taxLabel', 'taxRate', 'tariff', 'otherCostPerKw'];
-const MAX_PRODUCT_UNITS = 30;
+const MAX_PRODUCT_UNITS = 60;
 const MAX_AGENT_ROLES = 30;
 
 /** Trim, de-dupe (case-insensitive), and validate the company's agent role labels. */

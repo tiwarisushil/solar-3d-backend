@@ -41,6 +41,7 @@ export const leadHandlers = {
   manualPriority: setLeadPriority(require(path.join(root, 'models/ManualLead.js'))),
   allList: require(path.join(root, 'controllers/allLeadsController.js')).listAllLeads,
   board: require(path.join(root, 'controllers/allLeadsController.js')).listLeadBoard,
+  activity: require(path.join(root, 'controllers/allLeadsController.js')).listLeadActivity,
 };
 export const { bindLeadsTenant } = require(path.join(root, 'middleware/tenant.js'));
 export const leadForm = require(path.join(root, 'utils/leadForm.js'));

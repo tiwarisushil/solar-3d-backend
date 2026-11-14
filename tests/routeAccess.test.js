@@ -112,5 +112,6 @@ test('manual leads: adding and importing need Leads › Add & import; the lead f
   assert.ok(gate('PUT', '/api/leads/manual/:id').includes('permission:leads:update'));
   assert.ok(gate('PUT', '/api/leads/manual/:id/status').includes('permission:leads:change_status'));
   assert.ok(gate('GET', '/api/leads/manual').includes('permission:leads:view|view_all|view_team'));
+  assert.ok(gate('GET', '/api/leads/activity').includes('permission:leads:view|view_all|view_team'));
   assert.ok(gate('PUT', '/api/organization/lead-form').includes('masters'));
 });

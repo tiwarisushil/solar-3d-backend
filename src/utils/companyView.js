@@ -6,7 +6,7 @@ import { subscriptionView } from '../services/subscription.service.js';
 
 /** Fields the owner's screens use. */
 export const OWNER_VISIBLE = [
-  'id', 'name', 'email', 'phone', 'address', 'website', 'taxId', 'pan', 'status',
+  'id', 'name', 'email', 'phone', 'alternatePhone', 'address', 'website', 'taxId', 'pan', 'status',
   'limits', 'subscription', 'features',
   'theme', 'logo', 'signature', 'qr', 'signatoryName', 'signatoryTitle', 'qrLabel', 'tagline', 'pdfTerms',
   'bankAccountName', 'bankName', 'bankAccountNumber', 'bankIfsc', 'bankBranch', 'bankAccountType', 'upiId', 'paymentQr', 'paymentQrLabel',

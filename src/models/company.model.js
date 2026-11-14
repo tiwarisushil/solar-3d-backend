@@ -44,6 +44,7 @@ const companySchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true, maxlength: 120 },
     email: text(200),
     phone: text(40),
+    alternatePhone: text(40),
     address: text(400),
     website: text(200),
     taxId: text(60), // GSTIN

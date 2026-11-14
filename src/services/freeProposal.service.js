@@ -33,9 +33,12 @@ const COVERS = ['magazine', 'photo', 'panel', 'minimal'];
 const LOGO = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
 const MAX_LOGO = 400 * 1024; // characters of the data: image
 
+const TAX_TYPES = new Set(['None', 'GST', 'VAT', 'Sales tax', 'Service tax', 'SST', 'HST', 'Other']);
+
 /**
- * The money of a proposal, from its lines: each line is quantity × rate; the discount comes off every line in
- * proportion, then each line's own tax is added. (The same sums as frontend/src/lib/freeProposalCalc.js.)
+ * The money of a proposal, from its lines: each line is quantity × rate; the discount comes off; then tax is applied
+ * from the proposal’s tax type + percent (legacy drafts without a tax type still use each line’s own tax %).
+ * Same sums as frontend/src/lib/freeProposalCalc.js.
  */
 export function proposalTotals(items = [], pricing = {}) {
   const lines = items.map((it) => ({ amount: round2(num(it.qty) * num(it.rate)), taxPercent: num(it.taxPercent, { max: 100 }) }));
@@ -43,7 +46,11 @@ export function proposalTotals(items = [], pricing = {}) {
   const discountAmount = round2(Math.min(subtotal, pricing.discountIsPercent ? (subtotal * num(pricing.discount, { max: 100 })) / 100 : num(pricing.discount)));
   const keep = subtotal > 0 ? 1 - discountAmount / subtotal : 1;
   const taxable = round2(subtotal - discountAmount);
-  const tax = round2(lines.reduce((a, l) => a + (l.amount * keep * l.taxPercent) / 100, 0));
+  const type = String(pricing.taxType || '').trim();
+  const useGlobal = Boolean(type) && type.toLowerCase() !== 'none';
+  const tax = useGlobal
+    ? round2((taxable * num(pricing.taxPercent, { max: 100 })) / 100)
+    : round2(lines.reduce((a, l) => a + (l.amount * keep * l.taxPercent) / 100, 0));
   const total = round2(taxable + tax);
   const subsidy = round2(Math.min(total, num(pricing.subsidy)));
   return { subtotal, discountAmount, taxable, tax, total, subsidy, net: round2(total - subsidy) };
@@ -73,9 +80,30 @@ export function cleanProposal(body = {}) {
     tariff: num(s.tariff, { max: 1e6 }),
   };
   const items = (Array.isArray(body.items) ? body.items : []).slice(0, 80)
-    .map((it) => ({ name: clip(it?.name, 160), description: clip(it?.description, 400), qty: num(it?.qty, { max: 1e9 }), unit: clip(it?.unit, 20), rate: num(it?.rate), taxPercent: num(it?.taxPercent, { max: 100 }) }))
+    .map((it) => {
+      const kind = it?.kind === 'service' ? 'service' : 'product';
+      return {
+        kind,
+        name: clip(it?.name, 160),
+        description: kind === 'service' ? '' : clip(it?.description, 400),
+        qty: kind === 'service' ? 1 : num(it?.qty, { max: 1e9 }),
+        unit: kind === 'service' ? '' : clip(it?.unit, 20),
+        rate: num(it?.rate),
+        taxPercent: num(it?.taxPercent, { max: 100 }),
+      };
+    })
     .filter((it) => it.name);
-  const pricing = { currency: /^[A-Z]{3}$/.test(String(p.currency || '')) ? p.currency : 'INR', discount: num(p.discount), discountIsPercent: Boolean(p.discountIsPercent), discountRemark: clip(p.discountRemark, 200), subsidy: num(p.subsidy) };
+  const taxTypeRaw = clip(p.taxType, 40);
+  const taxType = TAX_TYPES.has(taxTypeRaw) ? taxTypeRaw : 'None';
+  const pricing = {
+    currency: /^[A-Z]{3}$/.test(String(p.currency || '')) ? p.currency : 'INR',
+    discount: num(p.discount),
+    discountIsPercent: Boolean(p.discountIsPercent),
+    discountRemark: clip(p.discountRemark, 200),
+    taxType,
+    taxPercent: taxType.toLowerCase() === 'none' ? 0 : num(p.taxPercent, { max: 100 }),
+    subsidy: num(p.subsidy),
+  };
   const terms = { validUntil: /^\d{4}-\d{2}-\d{2}$/.test(String(t.validUntil || '')) ? t.validUntil : '', payment: richText(t.payment, 'payment terms'), conditions: richText(t.conditions, 'terms & conditions'), notes: richText(t.notes, 'notes') };
   const design = { cover: COVERS.includes(d.cover) ? d.cover : 'magazine', primary: HEX.test(d.primary || '') ? d.primary : '#1D4ED8', accent: HEX.test(d.accent || '') ? d.accent : '#F5B82E' };
 
@@ -84,7 +112,7 @@ export function cleanProposal(body = {}) {
   if (company.phone.replace(/\D/g, '').length < 7) throw badRequest('Enter your mobile number');
   if (client.name.length < 2) throw badRequest('Enter your client’s name');
   if (!(system.kw > 0)) throw badRequest('Enter the size of the system in kW');
-  if (!items.length) throw badRequest('Add at least one item with its quantity and rate');
+  if (!items.length) throw badRequest('Add at least one product or service with its quantity and rate');
   for (const it of items) if (!(it.qty > 0)) throw badRequest(`Enter the quantity of ${it.name}`);
 
   const logo = typeof body.logo === 'string' && body.logo.length <= MAX_LOGO && LOGO.test(body.logo) ? body.logo : '';

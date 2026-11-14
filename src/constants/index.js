@@ -10,7 +10,7 @@ export const DESIGN_GRID_TYPES = ['on_grid', 'off_grid', 'hybrid'];
 /** Client portal response to a proposed design (stored on the design until cleared on re-proposal). */
 export const CLIENT_PROPOSAL_DECISION = ['accepted', 'rejected', 'changes_requested'];
 export const PAYMENT_MODES = ['cash', 'upi', 'bank_transfer', 'cheque', 'card', 'other'];
-export const CLIENT_PROJECT_TYPES = ['residential', 'industrial', 'commercial'];
+export const CLIENT_PROJECT_TYPES = ['residential', 'industrial', 'commercial', 'agricultural'];
 export const CLIENT_ROOF_TYPES = ['concrete', 'factory', 'tin_shed'];
 export const PROJECT_STATUS = ['active', 'completed'];
 /** Scheduled maintenance visit on an installation (from the company's AMC template). */
@@ -50,7 +50,13 @@ export const INVOICE_KIND = ['sale', 'amc_parts'];
 export const TRANSPORT_MODES = ['road', 'rail', 'air', 'ship'];
 export const TRANSPORT_REASONS = ['supply', 'job_work', 'own_use', 'exhibition', 'others'];
 /** Default “per …” labels for catalog products; each company can change this list. */
-export const DEFAULT_PRODUCT_UNITS = ['Piece', 'Nos', 'Set', 'Metre', 'Foot', 'Kg', 'Box', 'Roll', 'Lot', 'Bundle'];
+export const DEFAULT_PRODUCT_UNITS = [
+  'Nos', 'Piece', 'Set', 'Kit', 'System',
+  'Panel', 'Module', 'String',
+  'Metre', 'Foot', 'Mm', 'Kg',
+  'Watt', 'kW',
+  'Box', 'Roll', 'Coil', 'Bundle', 'Lot', 'Length',
+];
 /** Default job titles for field staff; each company can edit this list under Agent roles. */
 export const DEFAULT_AGENT_ROLES = ['Site surveyor', 'Electrician', 'Installer', 'Supervisor', 'Inspector'];
 

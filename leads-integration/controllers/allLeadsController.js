@@ -81,7 +81,45 @@ async function applyMetaStatusFilter(filter, req, statusId, tenant) {
   filter._id = { $in: [...owned, ...adminOnly] };
 }
 
-async function loadMetaChunk(req, limit, statusId) {
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Date range for activity rows (`logs.at`), not when the lead was received. */
+function activityAtRange(req) {
+  const from = text(req.query.from || req.query.fromDate);
+  const to = text(req.query.to || req.query.toDate);
+  const range = {};
+  if (from && !Number.isNaN(Date.parse(from))) range.$gte = new Date(from);
+  if (to && !Number.isNaN(Date.parse(to))) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    range.$lte = end;
+  }
+  return Object.keys(range).length ? range : null;
+}
+
+/** Match log lines by status change (message starts with the status name) or by activity date. */
+async function activityLogMatch(req, statusId) {
+  const match = {};
+  const at = activityAtRange(req);
+  if (at) match['logs.at'] = at;
+  if (statusId === 'none') {
+    match['logs.action'] = { $nin: ['lead_status', 'lead_rescheduled'] };
+  } else if (isObjectId(statusId)) {
+    const st = await MetaLeadStatus.findOne({ ...leadCompanyFilter(req.leadsCompanyId), _id: statusId }).select('name').lean();
+    if (st?.name) {
+      match['logs.action'] = { $in: ['lead_status', 'lead_rescheduled'] };
+      match['logs.message'] = new RegExp(`^${escapeRegex(st.name)}( ·|$)`);
+    }
+  }
+  return match;
+}
+
+/**
+ * @param {{ activity?: boolean }} opts  Activity feed: skip lead received-date and current-status filters
+ *   (those are applied on each log line instead).
+ */
+async function buildMetaFilter(req, statusId, opts = {}) {
+  const activity = Boolean(opts.activity);
   const tenant = leadCompanyFilter(req.leadsCompanyId);
   const filter = { ...tenant, processingStatus: 'processed', isDeleted: false };
   const search = text(req.query.search).slice(0, 100).toLowerCase();
@@ -98,16 +136,82 @@ async function loadMetaChunk(req, limit, statusId) {
   const formId = text(req.query.formId);
   if (pageId) filter.pageId = pageId;
   if (formId) filter.formId = formId;
-  const from = text(req.query.from || req.query.fromDate);
-  const to = text(req.query.to || req.query.toDate);
-  if (from && !Number.isNaN(Date.parse(from))) filter.leadCreatedAt = { ...(filter.leadCreatedAt || {}), $gte: new Date(from) };
-  if (to && !Number.isNaN(Date.parse(to))) {
-    const end = new Date(to);
-    end.setHours(23, 59, 59, 999);
-    filter.leadCreatedAt = { ...(filter.leadCreatedAt || {}), $lte: end };
+  if (!activity) {
+    const from = text(req.query.from || req.query.fromDate);
+    const to = text(req.query.to || req.query.toDate);
+    if (from && !Number.isNaN(Date.parse(from))) filter.leadCreatedAt = { ...(filter.leadCreatedAt || {}), $gte: new Date(from) };
+    if (to && !Number.isNaN(Date.parse(to))) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      filter.leadCreatedAt = { ...(filter.leadCreatedAt || {}), $lte: end };
+    }
+    if (statusId) await applyMetaStatusFilter(filter, req, statusId, tenant);
   }
   withAssignedScope(filter, req);
-  if (statusId) await applyMetaStatusFilter(filter, req, statusId, tenant);
+  return { filter, tenant };
+}
+
+async function buildGoogleFilter(req, statusId, opts = {}) {
+  const activity = Boolean(opts.activity);
+  const filter = { ...leadCompanyFilter(req.leadsCompanyId), isDeleted: false };
+  const search = text(req.query.search).slice(0, 100).toLowerCase();
+  await applyLeadSearch(filter, { companyId: req.leadsCompanyId, search, kind: 'google' });
+  const assignedTo = text(req.query.assignedTo);
+  if (assignedTo === 'unassigned') filter.assignedTo = null;
+  else if (assignedTo === 'reassigned') filter.isReassigned = true;
+  else if (isObjectId(assignedTo)) Object.assign(filter, heldByCondition(assignedTo, { includePast: text(req.query.includePast) === '1' }));
+  if (!activity) {
+    if (statusId === 'none') filter.status = null;
+    else if (isObjectId(statusId)) filter.status = statusId;
+  }
+  const { priority, invalid } = readPriorityFilter(req.query.priority);
+  if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
+  if (priority !== null) filter.isPriority = priorityCondition(priority);
+  Object.assign(filter, scheduleFilterCondition(req.query));
+  if (!activity) {
+    const from = text(req.query.from || req.query.fromDate);
+    const to = text(req.query.to || req.query.toDate);
+    if (from && !Number.isNaN(Date.parse(from))) filter.createdAt = { ...(filter.createdAt || {}), $gte: new Date(from) };
+    if (to && !Number.isNaN(Date.parse(to))) {
+      const end = new Date(to);
+      end.setHours(23, 59, 59, 999);
+      filter.createdAt = { ...(filter.createdAt || {}), $lte: end };
+    }
+  }
+  withAssignedScope(filter, req);
+  return filter;
+}
+
+async function buildManualFilter(req, statusId, manualSource, opts = {}) {
+  const activity = Boolean(opts.activity);
+  const filter = { ...leadCompanyFilter(req.leadsCompanyId), isDeleted: false };
+  const search = text(req.query.search).slice(0, 100).toLowerCase();
+  await applyLeadSearch(filter, { companyId: req.leadsCompanyId, search, kind: 'manual' });
+  const assignedTo = text(req.query.assignedTo);
+  if (assignedTo === 'unassigned') filter.assignedTo = null;
+  else if (assignedTo === 'reassigned') filter.isReassigned = true;
+  else if (isObjectId(assignedTo)) Object.assign(filter, heldByCondition(assignedTo, { includePast: text(req.query.includePast) === '1' }));
+  if (!activity) {
+    if (statusId === 'none') filter.status = null;
+    else if (isObjectId(statusId)) filter.status = statusId;
+  }
+  if (manualSource === 'manual' || manualSource === 'import') filter.source = manualSource;
+  const { priority, invalid } = readPriorityFilter(req.query.priority);
+  if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
+  if (priority !== null) filter.isPriority = priorityCondition(priority);
+  Object.assign(filter, scheduleFilterCondition(req.query));
+  if (!activity) {
+    const from = text(req.query.from || req.query.fromDate);
+    const to = text(req.query.to || req.query.toDate);
+    if (from && !Number.isNaN(Date.parse(from))) filter.createdAt = { ...(filter.createdAt || {}), $gte: new Date(from) };
+    if (to && !Number.isNaN(Date.parse(to))) filter.createdAt = { ...(filter.createdAt || {}), $lte: new Date(to) };
+  }
+  withAssignedScope(filter, req);
+  return filter;
+}
+
+async function loadMetaChunk(req, limit, statusId) {
+  const { filter, tenant } = await buildMetaFilter(req, statusId);
 
   const [total, leads] = await Promise.all([
     MetaLead.countDocuments(filter),
@@ -135,28 +239,7 @@ async function loadMetaChunk(req, limit, statusId) {
 }
 
 async function loadGoogleChunk(req, limit, statusId) {
-  const filter = { ...leadCompanyFilter(req.leadsCompanyId), isDeleted: false };
-  const search = text(req.query.search).slice(0, 100).toLowerCase();
-  await applyLeadSearch(filter, { companyId: req.leadsCompanyId, search, kind: 'google' });
-  const assignedTo = text(req.query.assignedTo);
-  if (assignedTo === 'unassigned') filter.assignedTo = null;
-  else if (assignedTo === 'reassigned') filter.isReassigned = true;
-  else if (isObjectId(assignedTo)) Object.assign(filter, heldByCondition(assignedTo, { includePast: text(req.query.includePast) === '1' }));
-  if (statusId === 'none') filter.status = null;
-  else if (isObjectId(statusId)) filter.status = statusId;
-  const { priority, invalid } = readPriorityFilter(req.query.priority);
-  if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
-  if (priority !== null) filter.isPriority = priorityCondition(priority);
-  Object.assign(filter, scheduleFilterCondition(req.query));
-  const from = text(req.query.from || req.query.fromDate);
-  const to = text(req.query.to || req.query.toDate);
-  if (from && !Number.isNaN(Date.parse(from))) filter.createdAt = { ...(filter.createdAt || {}), $gte: new Date(from) };
-  if (to && !Number.isNaN(Date.parse(to))) {
-    const end = new Date(to);
-    end.setHours(23, 59, 59, 999);
-    filter.createdAt = { ...(filter.createdAt || {}), $lte: end };
-  }
-  withAssignedScope(filter, req);
+  const filter = await buildGoogleFilter(req, statusId);
 
   const [total, leads] = await Promise.all([
     GoogleLead.countDocuments(filter),
@@ -178,25 +261,7 @@ async function loadGoogleChunk(req, limit, statusId) {
 }
 
 async function loadManualChunk(req, limit, statusId, manualSource) {
-  const filter = { ...leadCompanyFilter(req.leadsCompanyId), isDeleted: false };
-  const search = text(req.query.search).slice(0, 100).toLowerCase();
-  await applyLeadSearch(filter, { companyId: req.leadsCompanyId, search, kind: 'manual' });
-  const assignedTo = text(req.query.assignedTo);
-  if (assignedTo === 'unassigned') filter.assignedTo = null;
-  else if (assignedTo === 'reassigned') filter.isReassigned = true;
-  else if (isObjectId(assignedTo)) Object.assign(filter, heldByCondition(assignedTo, { includePast: text(req.query.includePast) === '1' }));
-  if (statusId === 'none') filter.status = null;
-  else if (isObjectId(statusId)) filter.status = statusId;
-  if (manualSource === 'manual' || manualSource === 'import') filter.source = manualSource;
-  const { priority, invalid } = readPriorityFilter(req.query.priority);
-  if (invalid) throw Object.assign(new Error('Invalid filter'), { status: 400 });
-  if (priority !== null) filter.isPriority = priorityCondition(priority);
-  Object.assign(filter, scheduleFilterCondition(req.query));
-  const from = text(req.query.from || req.query.fromDate);
-  const to = text(req.query.to || req.query.toDate);
-  if (from && !Number.isNaN(Date.parse(from))) filter.createdAt = { ...(filter.createdAt || {}), $gte: new Date(from) };
-  if (to && !Number.isNaN(Date.parse(to))) filter.createdAt = { ...(filter.createdAt || {}), $lte: new Date(to) };
-  withAssignedScope(filter, req);
+  const filter = await buildManualFilter(req, statusId, manualSource);
 
   const [total, leads] = await Promise.all([
     ManualLead.countDocuments(filter),
@@ -214,6 +279,135 @@ async function loadManualChunk(req, limit, statusId, manualSource) {
       : null,
   }, lead.source === 'import' ? 'import' : 'manual', { address: lead.address || '', ...(lead.source === 'referral' ? { sourceLabel: 'Referral', referredByClientName: lead.referredByClientName || '', referredByClientPhone: lead.referredByClientPhone || '' } : {}) })); // a client's referral: a manual lead, named as what it is
   return { total, items };
+}
+
+const ACTIVITY_TITLE = {
+  lead_assigned: 'Assigned',
+  lead_reassigned: 'Reassigned',
+  lead_unassigned: 'Assignment removed',
+  lead_status: 'Status changed',
+  lead_rescheduled: 'Rescheduled',
+  referral: 'Referred by a client',
+};
+
+/** One log line as a feed row: lead, who holds it, and a readable summary of what happened. */
+function toActivityRow(lead, log, leadSource) {
+  const action = log.action || '';
+  const message = text(log.message);
+  const title = ACTIVITY_TITLE[action] || action || 'Activity';
+  const parts = message ? message.split(' · ').map((p) => p.trim()).filter(Boolean) : [];
+  let summary = title;
+  let remark = '';
+  if (action === 'lead_status' || action === 'lead_rescheduled') {
+    const statusName = parts[0] || '';
+    const rest = parts.slice(1);
+    // status log is "Status · optional date · optional remark"
+    if (rest.length >= 2) remark = rest.slice(1).join(' · ');
+    else if (rest.length === 1 && !/^\w{3}\s+\d/i.test(rest[0]) && !/^\d/.test(rest[0])) remark = rest[0];
+    summary = statusName
+      ? `${action === 'lead_rescheduled' ? 'Rescheduled' : 'Status changed'} → ${statusName}`
+      : title;
+  } else if (action === 'lead_assigned' && message) {
+    summary = `Assigned to ${message}`;
+  } else if (action === 'lead_reassigned' && message) {
+    summary = `Reassigned ${message}`;
+  } else if (action === 'lead_unassigned') {
+    summary = message || 'Assignment removed';
+  } else if (message) {
+    summary = `${title}: ${message}`;
+    remark = message;
+  }
+  const assignee = lead.assignedTo?._id
+    ? { _id: lead.assignedTo._id, name: lead.assignedTo.name || '' }
+    : lead.assignedTo?.name
+      ? { _id: lead.assignedTo, name: lead.assignedTo.name }
+      : null;
+  const source = leadSource === 'manual' && lead.source === 'import' ? 'import' : leadSource === 'manual' && lead.source === 'referral' ? 'manual' : leadSource;
+  return {
+    id: `${source}-${lead._id}-${log.at ? new Date(log.at).getTime() : 0}-${action}`,
+    at: log.at || null,
+    action,
+    title,
+    summary,
+    message,
+    remark,
+    byName: log.byName || '',
+    lead: {
+      _id: lead._id,
+      fullName: lead.fullName || '',
+      phone: lead.phone || '',
+      leadSource: source,
+      sourceLabel: lead.source === 'referral' ? 'Referral' : (SOURCE_LABEL[source] || source),
+    },
+    assignedTo: assignee,
+  };
+}
+
+const activityPipeline = (filter, logMatch, limit) => {
+  const afterUnwind = Object.keys(logMatch).length ? [{ $match: logMatch }] : [];
+  return [
+    { $match: { ...filter, 'logs.0': { $exists: true } } },
+    { $unwind: '$logs' },
+    ...afterUnwind,
+    { $sort: { 'logs.at': -1 } },
+    { $limit: limit },
+    { $lookup: { from: 'users', localField: 'assignedTo', foreignField: '_id', as: '_assignee', pipeline: [{ $project: { name: 1 } }] } },
+    {
+      $project: {
+        fullName: 1,
+        phone: 1,
+        source: 1,
+        logs: 1,
+        assignedTo: { $arrayElemAt: ['$_assignee', 0] },
+      },
+    },
+  ];
+};
+
+const activityCountPipeline = (filter, logMatch) => {
+  const afterUnwind = Object.keys(logMatch).length ? [{ $match: logMatch }] : [];
+  return [
+    { $match: { ...filter, 'logs.0': { $exists: true } } },
+    { $unwind: '$logs' },
+    ...afterUnwind,
+    { $count: 'n' },
+  ];
+};
+
+async function loadMetaActivity(req, limit, statusId) {
+  const [{ filter }, logMatch] = await Promise.all([
+    buildMetaFilter(req, statusId, { activity: true }),
+    activityLogMatch(req, statusId),
+  ]);
+  const [countRow, rows] = await Promise.all([
+    MetaLead.aggregate(activityCountPipeline(filter, logMatch)),
+    MetaLead.aggregate(activityPipeline(filter, logMatch, limit)),
+  ]);
+  return { total: countRow[0]?.n || 0, items: rows.map((r) => toActivityRow(r, r.logs, 'meta')) };
+}
+
+async function loadGoogleActivity(req, limit, statusId) {
+  const [filter, logMatch] = await Promise.all([
+    buildGoogleFilter(req, statusId, { activity: true }),
+    activityLogMatch(req, statusId),
+  ]);
+  const [countRow, rows] = await Promise.all([
+    GoogleLead.aggregate(activityCountPipeline(filter, logMatch)),
+    GoogleLead.aggregate(activityPipeline(filter, logMatch, limit)),
+  ]);
+  return { total: countRow[0]?.n || 0, items: rows.map((r) => toActivityRow(r, r.logs, 'google')) };
+}
+
+async function loadManualActivity(req, limit, statusId, manualSource) {
+  const [filter, logMatch] = await Promise.all([
+    buildManualFilter(req, statusId, manualSource, { activity: true }),
+    activityLogMatch(req, statusId),
+  ]);
+  const [countRow, rows] = await Promise.all([
+    ManualLead.aggregate(activityCountPipeline(filter, logMatch)),
+    ManualLead.aggregate(activityPipeline(filter, logMatch, limit)),
+  ]);
+  return { total: countRow[0]?.n || 0, items: rows.map((r) => toActivityRow(r, r.logs, 'manual')) };
 }
 
 // @route GET /api/leads/all
@@ -305,4 +499,39 @@ const listLeadBoard = async (req, res) => {
   }
 };
 
-module.exports = { listAllLeads, listLeadBoard };
+// @route GET /api/leads/activity — every log line on matching leads (same filters as the list), newest first
+const listLeadActivity = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
+    const statusId = text(req.query.statusId);
+    const wanted = sourcesWanted(req.query.source);
+    const fetchCap = page * pageSize;
+
+    const parts = await Promise.all([
+      wanted.meta ? loadMetaActivity(req, fetchCap, statusId) : { total: 0, items: [] },
+      wanted.google ? loadGoogleActivity(req, fetchCap, statusId) : { total: 0, items: [] },
+      wanted.manual ? loadManualActivity(req, fetchCap, statusId, wanted.manualSource) : { total: 0, items: [] },
+    ]);
+
+    const total = parts.reduce((n, p) => n + p.total, 0);
+    const activities = parts
+      .flatMap((p) => p.items)
+      .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0) || String(b.id).localeCompare(String(a.id)))
+      .slice((page - 1) * pageSize, page * pageSize);
+
+    res.json({
+      activities,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    });
+  } catch (error) {
+    if (error.status === 400) return res.status(400).json({ message: error.message });
+    console.error('[LEAD_ACTIVITY]', error.message);
+    res.status(500).json({ message: 'Could not load activity' });
+  }
+};
+
+module.exports = { listAllLeads, listLeadBoard, listLeadActivity };
