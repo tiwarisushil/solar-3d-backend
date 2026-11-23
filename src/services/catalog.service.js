@@ -174,6 +174,8 @@ export const parentCategoryService = {
 };
 
 export const categoryService = {
+  /** One category, with the same product count the list shows. */
+  get: async (company, id) => categoryWithProductCount(company, await getCategory(company, id)),
   /** In the company's own order (new ones last); each with its product count. */
   list: async (company) => {
     const [categories, counts] = await Promise.all([
