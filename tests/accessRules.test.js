@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import express from 'express';
 import mongoose from 'mongoose';
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { MongoMemoryReplSet } from 'mongodb-memory-server';
 
 process.env.S3_BUCKET = '';
 process.env.JWT_SECRET ||= 'test-only-secret';
@@ -23,7 +23,8 @@ const { startLeadsApp, mkUser, ManualLead, MetaLead, MetaLeadStatus, MetaLeadAss
 
 let server, leads, http, base, current;
 before(async () => {
-  server = await MongoMemoryServer.create();
+  // a replica set, because sign-in opens its session inside a transaction
+  server = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } });
   await mongoose.connect(server.getUri());
   await Promise.all(mongoose.modelNames().map((n) => mongoose.model(n).init()));
   leads = await startLeadsApp();

@@ -48,3 +48,15 @@ export async function assertWithinCap(company, what, adding = 1) {
     throw badRequest(`Your company has reached its plan limit of ${cap} ${cap === 1 ? one : many}, counted across all branches. Ask your company admin to upgrade the plan to add more.`);
   }
 }
+
+/**
+ * Copies the organization's sign-in limit onto every branch, so `company.limits.maxConcurrentLogins` always shows the
+ * same number. The organization holds the limit (see `sessionLimitOf`); each branch's owners and the company admin
+ * each get the full number, it is never split between branches. Call after `org` is saved.
+ */
+export async function syncBranchLoginLimits(org, session = null) {
+  if (!org?._id) return;
+  const n = org.limits?.maxConcurrentLogins;
+  if (!Number.isInteger(n) || n < 1) return;
+  await Company.updateMany({ organization: org._id }, { $set: { 'limits.maxConcurrentLogins': n } }, { session });
+}

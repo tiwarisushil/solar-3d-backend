@@ -28,6 +28,7 @@ const organizationSchema = new mongoose.Schema(
       maxDesigns: { type: Number, default: 200, min: 1 },
     },
     capsMigrated: { type: Boolean, default: false }, // migrations/orgCaps.migration.js ran for this company
+    loginLimitMigrated: { type: Boolean, default: false }, // migrations/loginLimit.migration.js ran for this company
     subscription: {
       periodStart: { type: Date, default: null },
       periodEnd: { type: Date, default: null },

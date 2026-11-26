@@ -2,7 +2,7 @@ import { Company, Organization, Plan } from '../models/index.js';
 import { limitsOf, usageOf } from './orgLimits.service.js';
 import { badRequest, forbidden, notFound } from '../utils/HttpError.js';
 import { objectId } from '../utils/validators.js';
-import { applyPlanLimitsToCompany, BILLING_PERIOD_DAYS, getPlan, limitsForCompany, planSummary } from './plan.service.js';
+import { applyPlanLimitsToCompany, BILLING_PERIOD_DAYS, getPlan, limitsForCompany, planSummary, sessionLimitOf } from './plan.service.js';
 
 const MS_DAY = 86400000;
 
@@ -38,9 +38,18 @@ async function companyPlan(company) {
   return Plan.findById(company.planRef);
 }
 
+/** The organization of a branch (already populated, loaded by id, or null for legacy branches without one). */
+async function organizationOf(company) {
+  const ref = company?.organization;
+  if (!ref) return null;
+  if (ref.limits) return ref;
+  return Organization.findById(ref._id ?? ref).select('limits').lean();
+}
+
 export async function subscriptionView(company) {
-  const plan = await companyPlan(company);
-  const limits = limitsForCompany(company, plan);
+  const [plan, organization] = await Promise.all([companyPlan(company), organizationOf(company)]);
+  // the sign-in limit shown is the one sign-in enforces (each branch's owners, and the company admin, get the full number)
+  const limits = { ...limitsForCompany(company, plan), maxConcurrentLogins: sessionLimitOf(company, organization) };
   const sub = company.subscription || {};
   const companyLimits = await limitsOf(company); // company-wide: branches, clients, designs (usage: subscriptionUsage)
   return {

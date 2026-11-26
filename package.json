@@ -32,11 +32,13 @@
     "nodemailer": "^7.0.13",
     "qrcode": "^1.5.4",
     "sanitize-html": "^2.17.7",
+    "swagger-ui-express": "^5.0.1",
     "xlsx": "^0.18.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
+    "fast-check": "^4.11.0",
     "mongodb-memory-server": "^10.4.3"
   }
 }

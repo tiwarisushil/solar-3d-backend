@@ -7,7 +7,7 @@ import { hashPassword, verifyPassword } from '../utils/password.js';
 import { pick } from '../utils/pick.js';
 import { signToken } from '../utils/token.js';
 import { objectId, password as validPassword } from '../utils/validators.js';
-import { assertAdminLoginAllowed, assertConcurrentLoginAllowed, confirmAdminWithinLimit, confirmWithinDeviceLimit, newSessionId, registerSession, revokeAllCompanySessions, revokeSession, revokeUserSessions } from './session.service.js';
+import { newSessionId, openLimitedSession, registerSession, revokeAllCompanySessions, revokeSession, revokeUserSessions } from './session.service.js';
 import { ownerCompanyView } from '../utils/companyView.js';
 import { resolvePermissions } from './permission.service.js';
 import { applyOrganizationMasters, branchWithMasters, loadOrganizationForBranch } from './tenant.service.js';
@@ -105,17 +105,16 @@ export async function login({ email, password, ip, userAgent, replaceSessions = 
   attempts.delete(key);
   let token;
   if (company) {
-    if (user.role === ROLES.BRANCH) {
-      if (replaceSessions) await revokeAllCompanySessions(company._id);
-      else await assertConcurrentLoginAllowed(company);
-    } else if (user.role === ROLES.COMPANY) {
-      if (replaceSessions) await revokeUserSessions(user._id); // only the admin's own devices
-      else await assertAdminLoginAllowed(user, organization);
-    }
     const sid = newSessionId();
-    await registerSession({ user, company, sessionId: sid, userAgent });
-    if (user.role === ROLES.BRANCH && !replaceSessions) await confirmWithinDeviceLimit(company, sid);
-    if (user.role === ROLES.COMPANY && !replaceSessions) await confirmAdminWithinLimit(user, organization, sid);
+    const limitedScope = user.role === ROLES.BRANCH ? 'branch' : user.role === ROLES.COMPANY ? 'admin' : null;
+    if (limitedScope && !replaceSessions) {
+      // check the sign-in limit and open the session in one step (safe when several devices sign in at once)
+      await openLimitedSession({ user, company, organization, sessionId: sid, userAgent, scope: limitedScope });
+    } else {
+      if (replaceSessions && limitedScope === 'branch') await revokeAllCompanySessions(company._id);
+      if (replaceSessions && limitedScope === 'admin') await revokeUserSessions(user._id); // only the admin's own devices
+      await registerSession({ user, company, sessionId: sid, userAgent }); // agents and clients have no limit
+    }
     token = signToken(user, { sid, branchId: company._id });
   } else {
     const sid = newSessionId();

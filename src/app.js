@@ -7,6 +7,7 @@ import { errorHandler, notFoundHandler } from './middlewares/error.middleware.js
 import { rateLimit } from './middlewares/rateLimit.middleware.js';
 import { requestLogger } from './middlewares/requestLog.middleware.js';
 import { securityHeaders } from './middlewares/securityHeaders.middleware.js';
+import { mountDocs } from './docs/mount.js';
 import apiRoutes from './routes/index.js';
 import uploadRoutes from './routes/upload.routes.js';
 import { handleMetaCallback, metaWebhookRoutes, receiveGoogleAdsLead } from './integrations/leads.js';
@@ -43,6 +44,8 @@ app.use(express.json({ limit: '4mb' }));
 app.get('/api/company/integrations/meta/callback', securityHeaders, rateLimit({ name: 'meta-callback', windowMs: 10 * 60 * 1000, max: 60, by: 'ip' }), handleMetaCallback);
 app.post('/api/company/google-leads/webhook', securityHeaders, rateLimit({ name: 'google-ads-webhook', windowMs: 60 * 1000, max: 240, by: 'ip' }), receiveGoogleAdsLead);
 
+// Docs stay off the API CSP (default-src 'none' would block Swagger UI).
+mountDocs(app);
 app.get('/health', securityHeaders, (req, res) => res.json({ ok: true, db: dbReady() }));
 // Company logos / signatures / QR images (random file names; loaded by <img> and the PDF generator).
 app.use('/uploads', uploadRoutes);

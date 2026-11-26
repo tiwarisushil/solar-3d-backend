@@ -6,6 +6,7 @@ import { objectId } from '../utils/validators.js';
 import { calculatePlanPrice } from './pricing.service.js';
 import { Organization } from '../models/index.js';
 import { applyPlanLimitsToCompany, applyPlanToOrganization, BILLING_PERIOD_DAYS, planSummary } from './plan.service.js';
+import { syncBranchLoginLimits } from './orgLimits.service.js';
 
 const DAY = 86400000;
 
@@ -171,6 +172,7 @@ export async function approvePlanRequest(id, body, admin) {
     const held = await Company.countDocuments({ organization: org._id });
     if (org.limits.maxBranches < held) org.limits.maxBranches = held; // never below the branches it already has
     await org.save();
+    await syncBranchLoginLimits(org); // every branch's owners and the company admin get the approved sign-in limit
   }
   row.status = 'approved';
   row.adminNotes = body?.adminNotes ?? row.adminNotes;

@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { DEFAULT_AGENT_ROLES, DEFAULT_STEP_PRIORITY, ROLES, STEP_PRIORITIES } from '../constants/index.js';
 import { AuthSession, Client, Company, Design, Notification, Organization, Plan, Product, User } from '../models/index.js';
 import { applyPlanLimitsToCompany, applyPlanToOrganization, planSummary } from './plan.service.js';
-import { usageOf } from './orgLimits.service.js';
+import { syncBranchLoginLimits, usageOf } from './orgLimits.service.js';
 import { parseInvoiceNumbering } from './invoiceNumber.service.js';
 import { parseProposalNumbering } from './proposalNumber.service.js';
 import { assignPlanAsAdmin, ensureCompanySubscription, subscriptionView } from './subscription.service.js';
@@ -216,8 +216,9 @@ export async function createCompany(body) {
 /**
  * The platform admin edits a company row (a branch). Sign-in limits:
  *  - without branches the company and its one branch share the same number;
- *  - with branches it is the company-wide pool, which the company admin shares out between branches — so it can't go
- *    below what the branches already hold, and the branch cap itself is left to the company admin.
+ *  - with branches the organization holds one number; each branch's owners get the full number for their own devices,
+ *    and the company admin separately gets the same number for their own devices. It is not split between branches,
+ *    and it is copied onto every branch when saved.
  * Everything is checked before anything is written.
  */
 export async function updateCompanyAsAdmin(id, body) {
@@ -227,16 +228,15 @@ export async function updateCompanyAsAdmin(id, body) {
   const whole = (v) => Math.max(1, Math.floor(Number(v)) || 1);
   // only what actually changes is checked and written: re-saving a form never trips over the current numbers
   const changed = (v, now) => (v != null && whole(v) !== now ? whole(v) : null);
-  const logins = changed(body?.limits?.maxConcurrentLogins, withBranches ? org.limits?.maxConcurrentLogins : company.limits?.maxConcurrentLogins);
+  const current = withBranches ? org.limits?.maxConcurrentLogins : company.limits?.maxConcurrentLogins;
+  const logins = changed(body?.limits?.maxConcurrentLogins, current);
   const maxBranches = withBranches ? changed(body?.limits?.maxBranches, org.limits?.maxBranches) : null;
   // company-wide caps, counted across every branch together; never below what the company already holds
   const maxClients = org ? changed(body?.limits?.maxClients, org.limits?.maxClients) : null;
   const maxDesigns = org ? changed(body?.limits?.maxDesigns, org.limits?.maxDesigns) : null;
-  if (withBranches) {
-    const branches = await Company.find({ organization: org._id }).select('limits').lean();
-    const held = branches.reduce((a, b) => a + (Number(b.limits?.maxConcurrentLogins) || 0), 0);
-    if (logins != null && logins < held) throw badRequest(`The branches already hold ${held} sign-ins between them. Ask the company admin to lower a branch’s limit first, or allow at least ${held}.`);
-    if (maxBranches != null && maxBranches < branches.length) throw badRequest(`This company already has ${branches.length} branches; the limit can’t be lower.`);
+  if (maxBranches != null) {
+    const branchCount = await Company.countDocuments({ organization: org._id });
+    if (maxBranches < branchCount) throw badRequest(`This company already has ${branchCount} branches; the limit can’t be lower.`);
   }
 
   applyAdminFields(company, { ...body, limits: withBranches ? undefined : body?.limits });
@@ -244,6 +244,11 @@ export async function updateCompanyAsAdmin(id, body) {
   const plan = body?.planId ? await assignPlanAsAdmin(company, body.planId, { limits: company.limits }) : null;
   // the company-wide caps this save leaves: a plan change sets them from the plan (typed numbers win); otherwise only typed numbers change them
   const planChanged = Boolean(plan) && String(plan._id) !== prevPlanId;
+  // the one sign-in limit this save leaves, used by every branch's owners and the company admin (a typed number wins over the plan)
+  const typedLogins = body?.limits?.maxConcurrentLogins;
+  const nextLogins = planChanged ? (typedLogins != null ? whole(typedLogins) : (plan.maxConcurrentLogins ?? current)) : (logins ?? current);
+  // assignPlanAsAdmin writes a fixed plan's number onto the branch; the final number replaces it
+  if (nextLogins != null) company.limits.maxConcurrentLogins = nextLogins;
   if (org) {
     const usage = await usageOf(company);
     const nextClients = planChanged ? (body?.limits?.maxClients != null ? whole(body.limits.maxClients) : plan.maxClients) : (maxClients ?? org.limits?.maxClients);
@@ -258,16 +263,18 @@ export async function updateCompanyAsAdmin(id, body) {
   // moving to a plan sets the company-wide caps from it (never below what the company already holds); numbers typed in the same save win
   if (org && planChanged) {
     // typed numbers override the plan's defaults; untyped caps come from the plan
-    applyPlanToOrganization(org, plan, { maxClients: body?.limits?.maxClients, maxDesigns: body?.limits?.maxDesigns });
+    applyPlanToOrganization(org, plan, { maxClients: body?.limits?.maxClients, maxDesigns: body?.limits?.maxDesigns, maxConcurrentLogins: nextLogins });
     const held = await Company.countDocuments({ organization: org._id });
     org.limits.maxBranches = Math.max(org.limits.maxBranches, held);
   }
-  if (org && (logins != null || maxBranches != null || maxClients != null || maxDesigns != null || plan || body?.features)) {
+  const loginsChanged = nextLogins != null && (nextLogins !== current || nextLogins !== org?.limits?.maxConcurrentLogins);
+  if (org && (logins != null || loginsChanged || maxBranches != null || maxClients != null || maxDesigns != null || plan || body?.features)) {
     if (maxClients != null) org.limits.maxClients = maxClients;
     if (maxDesigns != null) org.limits.maxDesigns = maxDesigns;
-    if (logins != null) org.limits.maxConcurrentLogins = logins;
+    if (nextLogins != null) org.limits.maxConcurrentLogins = nextLogins;
     if (maxBranches != null) org.limits.maxBranches = maxBranches; // a company without branches always keeps exactly one
     await org.save();
+    await syncBranchLoginLimits(org); // every branch carries the same number as the organization
   }
   const user = await loginOf(company._id);
   if (user && body?.loginEmail !== undefined) await changeEmail(user, body.loginEmail);

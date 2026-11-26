@@ -7,6 +7,7 @@ export const schemaOptions = {
     transform: (doc, ret) => {
       delete ret._id;
       delete ret.passwordHash;
+      delete ret.sessionVersion; // internal sign-in lock counter (Company, User)
       return ret;
     },
   },

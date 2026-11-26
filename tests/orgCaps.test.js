@@ -9,7 +9,7 @@ const { createClient } = await import('../src/services/client.service.js');
 const { createDesign, duplicateDesign } = await import('../src/services/design.service.js');
 const { usageOf } = await import('../src/services/orgLimits.service.js');
 const { migrateOrgCaps } = await import('../src/migrations/orgCaps.migration.js');
-const { applyPlanToOrganization } = await import('../src/services/plan.service.js');
+const { applyPlanToOrganization, sessionLimitOf } = await import('../src/services/plan.service.js');
 const { updateCompanyAsAdmin } = await import('../src/services/company.service.js');
 
 let replSet;
@@ -70,11 +70,27 @@ test('raising the cap lets the company add more; lowering below what it holds is
 
 test('a plan sets the caps on the organization; a company without branches keeps one branch', async () => {
   const plan = await Plan.create({ code: 'big', name: 'Big', priceMonthly: 100, maxConcurrentLogins: 5, maxBranches: 7, maxClients: 800, maxDesigns: 1600 });
+  org.limits.maxConcurrentLogins = 1;
   applyPlanToOrganization(org, plan);
   assert.deepEqual([org.limits.maxBranches, org.limits.maxClients, org.limits.maxDesigns], [7, 800, 1600]);
+  assert.equal(org.limits.maxConcurrentLogins, 5); // the sign-in limit is copied too
   const solo = new Organization({ name: 'Solo', hasBranches: false });
   applyPlanToOrganization(solo, plan);
-  assert.deepEqual([solo.limits.maxBranches, solo.limits.maxClients], [1, 800]);
+  assert.deepEqual([solo.limits.maxBranches, solo.limits.maxClients, solo.limits.maxConcurrentLogins], [1, 800, 5]);
+  const custom = new Organization({ name: 'Custom', hasBranches: false });
+  applyPlanToOrganization(custom, plan, { maxConcurrentLogins: 9, maxBranches: 4 });
+  assert.deepEqual([custom.limits.maxConcurrentLogins, custom.limits.maxBranches], [9, 1]); // override wins; still one branch
+});
+
+test('sessionLimitOf: organization first, then the branch, then 2; ignores 0, null and non-integers', () => {
+  assert.equal(sessionLimitOf({ limits: { maxConcurrentLogins: 3 } }, { limits: { maxConcurrentLogins: 6 } }), 6);
+  assert.equal(sessionLimitOf({ limits: { maxConcurrentLogins: 3 } }, { limits: { maxConcurrentLogins: 0 } }), 3);
+  assert.equal(sessionLimitOf({ limits: { maxConcurrentLogins: 3 } }, { limits: { maxConcurrentLogins: 2.5 } }), 3);
+  assert.equal(sessionLimitOf({ limits: { maxConcurrentLogins: 4 } }, null), 4);
+  assert.equal(sessionLimitOf({ limits: { maxConcurrentLogins: null } }, { limits: {} }), 2);
+  assert.equal(sessionLimitOf({ limits: { maxConcurrentLogins: '5' } }, undefined), 2);
+  assert.equal(sessionLimitOf(null, null), 2);
+  assert.equal(sessionLimitOf(undefined, {}), 2);
 });
 
 test('migration: caps come from the plan, never below what the company already has, and it runs once', async () => {
@@ -89,4 +105,16 @@ test('migration: caps come from the plan, never below what the company already h
   await Organization.updateOne({ _id: org._id }, { $set: { 'limits.maxClients': 99 } });
   await migrateOrgCaps(); // already migrated: leaves the admin's number alone
   assert.equal((await Organization.findById(org._id)).limits.maxClients, 99);
+});
+
+test('the subscription screen shows the sign-in limit that sign-in enforces', async () => {
+  const { subscriptionView } = await import('../src/services/subscription.service.js');
+  const plan = await Plan.create({ code: 'fixed2', name: 'Fixed 2', kind: 'fixed', maxConcurrentLogins: 2, maxBranches: 3, maxClients: 10, maxDesigns: 10 });
+  await Company.updateOne({ _id: pune._id }, { $set: { planRef: plan._id, 'limits.maxConcurrentLogins': 2 } });
+  const view = await subscriptionView(await as(pune));
+  assert.equal(view.limits.maxConcurrentLogins, 5); // the organization's number, not the plan's or the branch's
+  assert.deepEqual(view.companyLimits, { maxBranches: 3, maxClients: 3, maxDesigns: 2 }); // other caps unchanged
+  // a legacy branch without an organization keeps its own number
+  const legacy = await Company.create({ name: 'Legacy', limits: { maxConcurrentLogins: 4 } });
+  assert.equal((await subscriptionView(legacy)).limits.maxConcurrentLogins, 4);
 });

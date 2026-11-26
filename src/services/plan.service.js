@@ -10,7 +10,7 @@ export const BILLING_PERIOD_DAYS = 30;
 
 const PLAN_FIELDS = ['name', 'description', 'kind', 'priceMonthly', 'maxConcurrentLogins', 'maxBranches', 'maxClients', 'maxDesigns', 'selfServe', 'active', 'sortOrder'];
 
-/** The limits a plan sets: sign-ins (per branch pool) and the company-wide caps (organization.limits). */
+/** The limits a plan sets: sign-ins (each branch owner and the company admin, not split) and the company-wide caps (organization.limits). */
 export const PLAN_LIMIT_KEYS = ['maxConcurrentLogins', 'maxBranches', 'maxClients', 'maxDesigns'];
 const LIMIT_LABELS = { maxConcurrentLogins: 'Concurrent sign-ins', maxBranches: 'Branches', maxClients: 'Clients', maxDesigns: 'Designs' };
 
@@ -110,13 +110,26 @@ export function limitsForCompany(company, plan) {
   };
 }
 
+/**
+ * The concurrent sign-in limit enforced for a branch's owners and for the company admin: the organization's number,
+ * else the branch's own (legacy branches without an organization), else the fallback. Ignores 0, null and non-integers.
+ */
+export function sessionLimitOf(company, organization) {
+  const valid = (n) => Number.isInteger(n) && n >= 1;
+  const fromOrg = organization?.limits?.maxConcurrentLogins;
+  if (valid(fromOrg)) return fromOrg;
+  const fromCompany = company?.limits?.maxConcurrentLogins;
+  if (valid(fromCompany)) return fromCompany;
+  return FALLBACK_LIMITS.maxConcurrentLogins;
+}
+
 export function applyPlanLimitsToCompany(company, plan) {
   const limits = limitsForCompany(company, plan);
   company.limits.maxConcurrentLogins = limits.maxConcurrentLogins;
 }
 
 /**
- * Writes a plan's company-wide caps onto the Organization (not saved here). `overrides` are the admin's numbers on a
+ * Writes a plan's company-wide caps and its sign-in limit onto the Organization (not saved here). `overrides` are the admin's numbers on a
  * custom plan. A company without branches always keeps exactly one branch.
  */
 export function applyPlanToOrganization(org, plan, overrides = {}) {
@@ -125,7 +138,7 @@ export function applyPlanToOrganization(org, plan, overrides = {}) {
     const n = Math.floor(Number(overrides[k] ?? plan?.[k]));
     return Number.isFinite(n) && n >= 1 ? n : null;
   };
-  for (const k of ['maxClients', 'maxDesigns']) {
+  for (const k of ['maxConcurrentLogins', 'maxClients', 'maxDesigns']) {
     const n = pick(k);
     if (n != null) org.limits[k] = n;
   }
