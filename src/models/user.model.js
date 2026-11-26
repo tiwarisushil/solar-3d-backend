@@ -27,6 +27,8 @@ const userSchema = new mongoose.Schema(
     active: { type: Boolean, default: true }, // an inactive agent cannot sign in
     lastLoginAt: Date,
     tokenVersion: { type: Number, default: 0 }, // bumped when the password changes: every older sign-in token stops working
+    // internal: bumped inside the company admin's sign-in transaction so simultaneous sign-ins conflict (session.service.js); not tokenVersion
+    sessionVersion: { type: Number, default: 0, select: false },
   },
   schemaOptions,
 );

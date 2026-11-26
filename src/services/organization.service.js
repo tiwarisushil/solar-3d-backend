@@ -8,7 +8,7 @@ import { email as validEmail, objectId, password as validPassword } from '../uti
 import { hashPassword } from '../utils/password.js';
 import { pickCommercialFromCompanyDoc, pickMastersFromCompanyDoc, effectiveBranchLimits } from './tenant.service.js';
 import { assignPlanAsAdmin } from './subscription.service.js';
-import { applyPlanToOrganization } from './plan.service.js';
+import { applyPlanToOrganization, sessionLimitOf } from './plan.service.js';
 import { updateOwnCompany, updateCatalogSettings, updateLeadForm, updateInstallationSteps, updateAmcTemplates, agentRolesList } from './company.service.js';
 import { updateLoanSteps } from './loan.service.js';
 import { updateSubsidySteps } from './subsidy.service.js';
@@ -357,19 +357,6 @@ export async function getOrganizationOverview(user) {
   };
 }
 
-function sumBranchCaps(branches, field) {
-  return branches.reduce((a, b) => a + (Number(b.limits?.[field]) || 0), 0);
-}
-
-function assertCapsWithinPool(org, branches, patch) {
-  const next = branches.map((b) => (String(b._id) === String(patch.id) ? { ...b, limits: { ...b.limits, ...patch.limits } } : b));
-  for (const field of ['maxConcurrentLogins']) {
-    const pool = org.limits?.[field] || 0;
-    const sum = sumBranchCaps(next, field);
-    if (sum > pool) throw badRequest(`Total branch ${field} (${sum}) cannot exceed the company pool (${pool}).`);
-  }
-}
-
 /** A sign-in email someone else took between our check and the write (unique index) → the same friendly error. */
 async function emailsFree(work) {
   try {
@@ -408,8 +395,8 @@ export async function createBranch(user, body) {
     if (branches.length >= maxBranches) {
       throw badRequest(`This company can have at most ${maxBranches} branch${maxBranches === 1 ? '' : 'es'}. Contact the platform administrator to increase the limit.`);
     }
-    const limits = { maxConcurrentLogins: 1 };
-    assertCapsWithinPool(org, [...branches, { _id: 'new', limits }], { id: 'new', limits });
+    // every branch gets the company's full sign-in limit; it is not split between branches
+    const limits = { maxConcurrentLogins: sessionLimitOf(null, org) };
 
     const [branch] = await Company.create([{ organization: org._id, name, email: body?.email, phone: body?.phone, status: 'active', limits }], { session });
     const [owner] = await User.create([{ email: ownerEmail, passwordHash, role: ROLES.BRANCH, name: String(body?.ownerName ?? '').trim(), company: branch._id, organization: org._id }], { session });
@@ -420,7 +407,7 @@ export async function createBranch(user, body) {
 export async function updateBranchCaps(user, branchId, body) {
   const patch = pick(body?.limits || body, ['maxConcurrentLogins']);
   if (patch.maxConcurrentLogins != null) {
-    throw badRequest('Each branch allows one signed-in device. This limit cannot be changed here.');
+    throw badRequest('Every branch can use the company’s full sign-in limit. Contact the platform administrator to change it.');
   }
   throw badRequest('No branch limits to update.');
 }
@@ -512,7 +499,7 @@ export async function createOrganizationWithBranch(body) {
     if (plan) {
       await assignPlanAsAdmin(org, plan.id, { limits: org.limits });
       // a fixed plan sets the caps; numbers typed on the form (custom plans) win
-      applyPlanToOrganization(org, plan, { maxBranches: hasBranches ? body?.limits?.maxBranches : 1, maxClients: body?.limits?.maxClients, maxDesigns: body?.limits?.maxDesigns });
+      applyPlanToOrganization(org, plan, { maxBranches: hasBranches ? body?.limits?.maxBranches : 1, maxClients: body?.limits?.maxClients, maxDesigns: body?.limits?.maxDesigns, maxConcurrentLogins: org.limits.maxConcurrentLogins });
       org.subscription = { periodStart: new Date(), periodEnd: new Date(Date.now() + 30 * 86400000) };
     }
     await org.save({ session });

@@ -62,7 +62,7 @@ sequenceDiagram
 4. `PUT /api/auth/me` changes only the display name. `POST /api/auth/password` changes the password and returns a **new** token; store that token.
 5. `POST /api/auth/logout` revokes this device. No body.
 
-One device at a time. A second login gets **403** `code: "DEVICE_LIMIT"`. Send `replaceSessions: true` only after the user confirms they want to sign the other device out. `replaceSessions` is not in the strict schema; send JSON `true` or `false`, not the string `"false"`.
+The company's sign-in limit (`maxConcurrentLogins`) caps how many devices are signed in at once. A branch owner counts only that branch's owner devices; the company admin counts only their own devices. Every branch gets the full number; it is not split between branches. Field agents and clients are not counted. A login past the limit gets **403** `code: "DEVICE_LIMIT"` with `details.max` (the limit), `details.active` and `details.sessions` (the signed-in devices). Send `replaceSessions: true` only after the user confirms they want to sign the other devices out: for a branch owner it signs out every owner device of that branch, for the company admin only the admin's own devices. `replaceSessions` is not in the strict schema; send JSON `true` or `false`, not the string `"false"`.
 
 ### Super admin opening a company
 
@@ -307,7 +307,7 @@ Company admin on `/org` (before switching into a branch):
 
 - `GET /api/organization/overview`
 - `GET /api/organization/branches`, `POST /api/organization/branches`
-- `PATCH /api/organization/branches/{id}` always returns **400**. A branch is fixed at one signed-in device, so there is no edit body that succeeds.
+- `PATCH /api/organization/branches/{id}` always returns **400**. Every branch uses the company's full sign-in limit, set by the platform administrator, so there is no edit body that succeeds.
 - Enter a branch with `POST /api/auth/branch`, then use the dashboard routes above.
 
 ## Catalog, stock, suppliers

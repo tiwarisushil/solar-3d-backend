@@ -155,6 +155,8 @@ const companySchema = new mongoose.Schema(
       default: () => [],
     },
     parentCategoriesSeeded: { type: Boolean, default: false }, // the default parent categories were created (see parentCategory.migration.js)
+    // internal: bumped inside a branch owner's sign-in transaction so simultaneous sign-ins conflict (session.service.js)
+    sessionVersion: { type: Number, default: 0, select: false },
   },
   schemaOptions,
 );

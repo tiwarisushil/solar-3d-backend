@@ -73,7 +73,7 @@ const limitsShape = {
   type: 'object',
   description: 'Whole numbers, each at least 1. Nothing is unlimited.',
   properties: {
-    maxConcurrentLogins: { type: 'integer', minimum: 1, maximum: 1000, description: 'Devices signed in at once. With branches this is the company-wide pool; each branch is fixed at 1.' },
+    maxConcurrentLogins: { type: 'integer', minimum: 1, maximum: 1000, description: 'Devices signed in at once, for each branch\'s owners and separately for the company admin\'s own devices. The same number applies to every branch; it is not split between branches.' },
     maxBranches: { type: 'integer', minimum: 1, maximum: 500, description: 'How many branches the company may have. A company without branches stays at 1.' },
     maxClients: { type: 'integer', minimum: 1, description: 'Clients counted across every branch together.' },
     maxDesigns: { type: 'integer', minimum: 1, description: 'Designs (proposals) counted across every branch together.' },
@@ -302,7 +302,7 @@ const companyView = {
     taxId: { type: 'string' },
     pan: { type: 'string' },
     status: { type: 'string', enum: ['active', 'suspended'] },
-    limits: { type: 'object', properties: { maxConcurrentLogins: { type: 'integer', description: 'Devices this branch may have signed in. With branches this is 1 and cannot be raised here.' } } },
+    limits: { type: 'object', properties: { maxConcurrentLogins: { type: 'integer', description: 'Devices this branch\'s owners may have signed in at once. Copy of the organization\'s sign-in limit; every branch has the same number.' } } },
     subscription: subscriptionShape,
     features: featuresShape,
     theme: { type: 'object', properties: { primary: hexColor, accent: hexColor } },
@@ -343,7 +343,7 @@ const companyView = {
       description: 'Same numbers as GET /api/company/subscription.',
       properties: {
         plan: planSummary,
-        limits: { type: 'object', properties: { maxConcurrentLogins: { type: 'integer' } }, description: 'Sign-in cap in force for this branch.' },
+        limits: { type: 'object', properties: { maxConcurrentLogins: { type: 'integer' } }, description: 'Sign-in limit enforced at login for this branch\'s owners (the organization\'s number; the same for every branch and for the company admin).' },
         companyLimits: { type: 'object', properties: { maxBranches: { type: 'integer' }, maxClients: { type: 'integer', nullable: true }, maxDesigns: { type: 'integer', nullable: true } } },
         subscription: {
           type: 'object',
@@ -389,6 +389,7 @@ const organizationDoc = {
     planRef: { ...ObjectId, nullable: true },
     limits: limitsShape,
     capsMigrated: { type: 'boolean', description: 'Internal. Ignore it.' },
+    loginLimitMigrated: { type: 'boolean', description: 'Internal. Ignore it.' },
     subscription: subscriptionShape,
     features: featuresShape,
     notes: { type: 'string', description: 'Platform admin notes. The company settings screen does not edit these.' },
@@ -446,7 +447,7 @@ const adminCompany = {
     maxBranches: { type: 'integer', description: 'Organization cap, not the branch’s own limit.' },
     maxClients: { type: 'integer', nullable: true },
     maxDesigns: { type: 'integer', nullable: true },
-    poolLogins: { type: 'integer', nullable: true, description: 'Company-wide sign-in pool (organization.limits.maxConcurrentLogins). This is the number the admin edits when the company has branches.' },
+    poolLogins: { type: 'integer', nullable: true, description: 'The company\'s sign-in limit (organization.limits.maxConcurrentLogins). Each branch\'s owners and the company admin may each have this many devices signed in; it is not split between branches.' },
     adminEmail: { type: 'string', description: 'Company admin sign-in (role company). "" when the company was set up without branches.' },
     loginEmail: { type: 'string', description: 'This branch owner’s sign-in (role branch).' },
     contactName: { type: 'string', description: 'Branch owner’s name.' },
@@ -933,7 +934,7 @@ export default {
       tags: ['Admin'],
       operationId: 'adminApprovePlanRequest',
       summary: 'Approve a pending plan request and move the company onto that plan.',
-      description: `${superadmin} Only a pending request can be approved. Otherwise 400 "This request has already been decided". Unknown id is 404 "Plan request not found". Missing company is 404 "Company not found".\n\nA preset request copies that fixed plan onto the company (caps and monthly price). 400 "The requested plan is no longer available" if the plan is gone, inactive, or not fixed.\n\nA custom request creates a dedicated plan. Limits you omit fall back to what the company asked for. They are range-checked: concurrent sign-ins and branches 1 to 500 ("Concurrent logins must be at least 1" / "cannot exceed 500", and the same for Branches), clients and designs 1 to 10000000. priceMonthly omitted or "" uses the price calculated from those limits; a negative or non-numeric price is 400 "Enter a valid monthly price". planName omitted or blank becomes "{company name} Custom" (at most 80 characters).\n\nperiodDays omitted becomes 30. The validator rejects values outside 1 to 366. The company’s subscription restarts today for that many days, status active, cancelAtPeriodEnd false. The branch cap is never set below the number of branches the company already has. Payment is not collected here. No email is sent. The response is the request, not the company.`,
+      description: `${superadmin} Only a pending request can be approved. Otherwise 400 "This request has already been decided". Unknown id is 404 "Plan request not found". Missing company is 404 "Company not found".\n\nA preset request copies that fixed plan onto the company (caps and monthly price). 400 "The requested plan is no longer available" if the plan is gone, inactive, or not fixed.\n\nA custom request creates a dedicated plan. Limits you omit fall back to what the company asked for. They are range-checked: concurrent sign-ins and branches 1 to 500 ("Concurrent logins must be at least 1" / "cannot exceed 500", and the same for Branches), clients and designs 1 to 10000000. priceMonthly omitted or "" uses the price calculated from those limits; a negative or non-numeric price is 400 "Enter a valid monthly price". planName omitted or blank becomes "{company name} Custom" (at most 80 characters).\n\nperiodDays omitted becomes 30. The validator rejects values outside 1 to 366. The company’s subscription restarts today for that many days, status active, cancelAtPeriodEnd false. The approved sign-in limit is written on the organization and every branch, whichever branch made the request, so each branch’s owners and the company admin may each have that many devices signed in. The branch cap is never set below the number of branches the company already has. Payment is not collected here. No email is sent. The response is the request, not the company.`,
       security: bearer,
       parameters: [idParam],
       requestBody: {
@@ -1261,7 +1262,7 @@ export default {
       tags: ['Admin'],
       operationId: 'adminUpdateCompany',
       summary: 'Edit a branch, its plan, its caps, and its sign-in emails.',
-      description: `${superadmin} Partial. Omit a key to leave it. Unknown id is 404 "Company not found". This edits one branch row. \`status\` is active or suspended for this branch only; it does not suspend the whole organization. An invalid status is 400 from the database ("… is not a valid status").\n\n\`planId\` assigns that plan. Unknown plan is 404 "Plan not found". Changing plan does not restart the billing period if one already exists. Typed caps win over the plan’s defaults. A company that already has more clients or designs than the new cap is 400 "This company already has {n} clients across its branches; the limit can’t be lower." (same sentence for designs).\n\nWith branches, \`limits.maxConcurrentLogins\` is the company-wide pool, not this branch’s cap (each branch stays at one device). It cannot go below the sum of what the branches already hold: 400 "The branches already hold {n} sign-ins between them. Ask the company admin to lower a branch’s limit first, or allow at least {n}." \`limits.maxBranches\` cannot go below the number of branches: 400 "This company already has {n} branches; the limit can’t be lower." Without branches, maxConcurrentLogins is written on the single branch and maxBranches stays 1.\n\n\`loginEmail\` changes the branch owner’s sign-in. \`contactName\` changes that user’s name. \`adminEmail\` changes the company admin; sending it (non-blank) on a company without an admin is 400 "This company has no company admin: it was set up without branches". A taken email is 400 "That email is already in use". Blank adminEmail is ignored. \`features\` (pdfBranding, excelImport) is copied onto the branch and the organization. \`notes\` is the private admin note. No email is sent.`,
+      description: `${superadmin} Partial. Omit a key to leave it. Unknown id is 404 "Company not found". This edits one branch row. \`status\` is active or suspended for this branch only; it does not suspend the whole organization. An invalid status is 400 from the database ("… is not a valid status").\n\n\`planId\` assigns that plan. Unknown plan is 404 "Plan not found". Changing plan does not restart the billing period if one already exists. Typed caps win over the plan’s defaults. A company that already has more clients or designs than the new cap is 400 "This company already has {n} clients across its branches; the limit can’t be lower." (same sentence for designs).\n\n\`limits.maxConcurrentLogins\` is the company’s sign-in limit. It is written on the organization and copied onto every branch, so each branch’s owners and the company admin may each have that many devices signed in; it is not split between branches. A typed number wins over the plan’s number in the same save. Lowering it is always allowed. \`limits.maxBranches\` cannot go below the number of branches: 400 "This company already has {n} branches; the limit can’t be lower." Without branches, the same sign-in limit applies to the single branch’s owner and maxBranches stays 1.\n\n\`loginEmail\` changes the branch owner’s sign-in. \`contactName\` changes that user’s name. \`adminEmail\` changes the company admin; sending it (non-blank) on a company without an admin is 400 "This company has no company admin: it was set up without branches". A taken email is 400 "That email is already in use". Blank adminEmail is ignored. \`features\` (pdfBranding, excelImport) is copied onto the branch and the organization. \`notes\` is the private admin note. No email is sent.`,
       security: bearer,
       parameters: [idParam],
       requestBody: {
@@ -1438,7 +1439,7 @@ export default {
       tags: ['Organization'],
       operationId: 'orgCreateBranch',
       summary: 'Add a branch with its own owner sign-in.',
-      description: `${companyAdmin} No validator. Name is required: 400 "Branch name is required". ownerEmail and ownerPassword are required: 400 "Enter the branch owner’s email and password". The password must be 8 to 200 characters (a letter and a digit are not required on this route). A bad email is 400 "Enter a valid email address". A taken email is 400 "That branch owner email is already in use" or "That email is already in use".\n\nA company set up without branches is 400 "This company was set up without branches. Contact the platform administrator." At the branch cap: 400 "This company can have at most {n} branch(es). Contact the platform administrator to increase the limit." The new branch is given one sign-in. If that would exceed the company pool: 400 "Total branch maxConcurrentLogins ({sum}) cannot exceed the company pool ({pool})."\n\nThe password is not returned and no email is sent. Give it to the branch owner yourself. The response is only the new branch id, name, limits, and the owner id and email.`,
+      description: `${companyAdmin} No validator. Name is required: 400 "Branch name is required". ownerEmail and ownerPassword are required: 400 "Enter the branch owner’s email and password". The password must be 8 to 200 characters (a letter and a digit are not required on this route). A bad email is 400 "Enter a valid email address". A taken email is 400 "That branch owner email is already in use" or "That email is already in use".\n\nA company set up without branches is 400 "This company was set up without branches. Contact the platform administrator." At the branch cap: 400 "This company can have at most {n} branch(es). Contact the platform administrator to increase the limit." The new branch gets the company’s full sign-in limit (organization.limits.maxConcurrentLogins); other branches’ numbers never block it.\n\nThe password is not returned and no email is sent. Give it to the branch owner yourself. The response is only the new branch id, name, limits, and the owner id and email.`,
       security: bearer,
       requestBody: {
         required: true,
@@ -1478,7 +1479,7 @@ export default {
       tags: ['Organization'],
       operationId: 'orgUpdateBranch',
       summary: 'Branch caps cannot be changed; this call always returns 400.',
-      description: `${companyAdmin} Each branch is fixed at one signed-in device. Sending limits.maxConcurrentLogins or a top-level maxConcurrentLogins (any value that is not null or missing) is 400 "Each branch allows one signed-in device. This limit cannot be changed here." Any other body, including an empty object, is 400 "No branch limits to update." There is no 200. The id is not looked up.`,
+      description: `${companyAdmin} Every branch uses the company’s full sign-in limit, set by the platform administrator. Sending limits.maxConcurrentLogins or a top-level maxConcurrentLogins (any value that is not null or missing) is 400 "Every branch can use the company’s full sign-in limit. Contact the platform administrator to change it." Any other body, including an empty object, is 400 "No branch limits to update." There is no 200. The id is not looked up.`,
       security: bearer,
       parameters: [idParam],
       requestBody: {

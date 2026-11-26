@@ -101,7 +101,7 @@ const organizationSchema = {
     limits: {
       type: 'object',
       properties: {
-        maxConcurrentLogins: { type: 'integer', description: 'Stored on the organization. The live device cap enforced at sign-in is 1 (see login 403 `DEVICE_LIMIT`).', example: 2 },
+        maxConcurrentLogins: { type: 'integer', description: 'Devices signed in at once, for each branch\'s owners and separately for the company admin\'s own devices. The same number applies to every branch; it is not split between branches.', example: 2 },
         maxBranches: { type: 'integer', example: 3 },
         maxClients: { type: 'integer', description: 'Clients counted across every branch.', example: 100 },
         maxDesigns: { type: 'integer', description: 'Proposals counted across every branch.', example: 200 },
@@ -200,7 +200,7 @@ const billingSchema = {
     limits: {
       type: 'object',
       properties: {
-        maxConcurrentLogins: { type: 'integer', description: 'Cap from the plan, or from the branch when the plan is custom or missing.', example: 1 },
+        maxConcurrentLogins: { type: 'integer', description: 'The sign-in limit enforced at login: the organization\'s number (the branch\'s own number only for a branch without an organization). Each branch\'s owners and the company admin may each have this many devices signed in; it is not split between branches.', example: 2 },
       },
     },
     companyLimits: {
@@ -250,7 +250,7 @@ const ownerCompany = {
     taxId: { type: 'string', description: 'GSTIN or other tax number.', example: '27AAACS1234F1Z5' },
     pan: { type: 'string', example: 'AAACS1234F' },
     status: { type: 'string', enum: ['active', 'suspended'] },
-    limits: { type: 'object', properties: { maxConcurrentLogins: { type: 'integer', example: 1 } } },
+    limits: { type: 'object', properties: { maxConcurrentLogins: { type: 'integer', description: 'Copy of the organization\'s sign-in limit. Every branch carries the same number.', example: 2 } } },
     subscription: {
       type: 'object',
       description: 'Raw subscription dates on the branch. The screen summary is `billing`.',
@@ -457,7 +457,7 @@ const loginExample = {
     taxId: '27AAACS1234F1Z5',
     pan: '',
     status: 'active',
-    limits: { maxConcurrentLogins: 1 },
+    limits: { maxConcurrentLogins: 2 },
     subscription: { periodStart: '2026-11-01T00:00:00.000Z', periodEnd: '2026-12-01T00:00:00.000Z', status: 'active', billingCycle: 'monthly', cancelAtPeriodEnd: false },
     features: { pdfBranding: true, excelImport: true },
     theme: { primary: '#1d4ed8', accent: '#f59e0b' },
@@ -494,8 +494,8 @@ const loginExample = {
     invoiceNumbering: { prefix: 'INV-', width: 4, next: 7, nextInvoiceNo: 'INV-0007' },
     proposalNumbering: { prefix: 'PRO-', suffix: '', width: 4, next: 12, nextProposalNo: 'PRO-0012' },
     billing: {
-      plan: { id: '665f1c2a3b4d5e6f7a8b9c40', code: 'pro', name: 'Pro', description: '', kind: 'fixed', priceMonthly: 4999, maxConcurrentLogins: 1, maxBranches: 3, maxClients: 100, maxDesigns: 200, features: [], selfServe: true, active: true },
-      limits: { maxConcurrentLogins: 1 },
+      plan: { id: '665f1c2a3b4d5e6f7a8b9c40', code: 'pro', name: 'Pro', description: '', kind: 'fixed', priceMonthly: 4999, maxConcurrentLogins: 2, maxBranches: 3, maxClients: 100, maxDesigns: 200, features: [], selfServe: true, active: true },
+      limits: { maxConcurrentLogins: 2 },
       companyLimits: { maxBranches: 3, maxClients: 100, maxDesigns: 200 },
       subscription: { periodStart: '2026-11-01T00:00:00.000Z', periodEnd: '2026-12-01T00:00:00.000Z', daysRemaining: 8, status: 'active', billingCycle: 'monthly', cancelAtPeriodEnd: false },
       renewal: { nextAmount: 4999, nextDate: '2026-12-01T00:00:00.000Z', daysRemaining: 8, billingCycle: 'monthly', cancelAtPeriodEnd: false },
@@ -519,11 +519,11 @@ const loginExample = {
 };
 
 const deviceLimitExample = {
-  error: 'Another device is already signed in. Sign out there first, then try again.',
+  error: 'The limit of 2 devices signed in at once has been reached. Sign out on one of them, then try again.',
   code: 'DEVICE_LIMIT',
   details: {
-    max: 1,
-    active: 1,
+    max: 2,
+    active: 2,
     sessions: [{
       sessionId: 'a1b2c3d4e5f67890',
       userName: 'Anita Sharma',
@@ -531,6 +531,13 @@ const deviceLimitExample = {
       role: 'branch',
       device: 'Windows PC',
       lastActiveAt: '2026-11-23T07:00:00.000Z',
+    }, {
+      sessionId: 'f0e9d8c7b6a54321',
+      userName: 'Anita Sharma',
+      userEmail: 'branch.pune@sunrisesolar.in',
+      role: 'branch',
+      device: 'Android phone',
+      lastActiveAt: '2026-11-23T06:30:00.000Z',
     }],
   },
 };
@@ -969,7 +976,7 @@ Other errors: 401 "Incorrect email or password". 403 "This account has been deac
         200: json('Session. Cache is not set specially. Replace any previous token.', loginResponse, loginExample),
         400: ValidationError,
         401: json('Wrong email or password, no active branch, or a company-admin account on an organization without branches. The message is always the same.', err, { error: 'Incorrect email or password' }),
-        403: json('Deactivated account, suspended company, or the device limit. When `code` is `DEVICE_LIMIT`, show the other devices from `details.sessions` and offer to sign in with `replaceSessions: true`. `details.max` is 1. `details.active` is how many devices are already in. Each session has `sessionId`, `userName`, `userEmail`, `role`, `device`, `lastActiveAt`.', {
+        403: json('Deactivated account, suspended company, or the device limit. When `code` is `DEVICE_LIMIT`, show the other devices from `details.sessions` and offer to sign in with `replaceSessions: true`. `details.max` is the company\'s sign-in limit. A branch owner counts only that branch\'s owner devices; the company admin counts only their own devices. `details.active` is how many devices are already in. Each session has `sessionId`, `userName`, `userEmail`, `role`, `device`, `lastActiveAt`.', {
           allOf: [err],
           properties: {
             code: { type: 'string', example: 'DEVICE_LIMIT' },

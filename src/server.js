@@ -5,6 +5,7 @@ import { env, redactMongoUri } from './config/env.js';
 import { migrateCatalog } from './migrations/catalog.migration.js';
 import { enforceTenantCatalogIsolation } from './migrations/tenantCatalog.migration.js';
 import { migrateOrgCaps } from './migrations/orgCaps.migration.js';
+import { migrateLoginLimits } from './migrations/loginLimit.migration.js';
 import { migrateSharedCatalog } from './migrations/sharedCatalog.migration.js';
 import { ensureSessionTtlIndex } from './migrations/authSessionTtl.migration.js';
 import { capUnlimitedLimits } from './migrations/limits.migration.js';
@@ -78,6 +79,7 @@ await backfillLeadAssignmentCompany();
 await ensureUniqueMetaPage();
 await ensureDefaultPlans();
 await migrateOrgCaps(); // after the plans carry their caps
+await migrateLoginLimits(); // one sign-in limit per company, on the organization and every branch
 await AuthSession.deleteMany({ $or: [{ expiresAt: null }, { expiresAt: { $exists: false } }] });
 await ensureSuperAdmin();
 startLeadIntegrationWorkers();

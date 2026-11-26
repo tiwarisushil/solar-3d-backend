@@ -10,7 +10,7 @@ import { MongoMemoryReplSet } from 'mongodb-memory-server';
 
 process.env.S3_BUCKET = '';
 
-const { Organization, Company, User, AuthSession, Notification } = await import('../src/models/index.js');
+const { Organization, Company, User, AuthSession, Notification, Plan } = await import('../src/models/index.js');
 const { createOrganizationWithBranch, createBranch, updateBranchCaps } = await import('../src/services/organization.service.js');
 const { deleteCompany, updateCompanyAsAdmin, resetCompanyPassword } = await import('../src/services/company.service.js');
 const { login, userView, organizationView } = await import('../src/services/auth.service.js');
@@ -31,7 +31,7 @@ after(async () => {
   await replSet?.stop();
 });
 beforeEach(async () => {
-  await Promise.all([User, Company, Organization, AuthSession, Notification].map((M) => M.deleteMany({})));
+  await Promise.all([User, Company, Organization, AuthSession, Notification, Plan].map((M) => M.deleteMany({})));
 });
 
 const PW = 'Goodpass123';
@@ -121,24 +121,38 @@ test('the create form asks for the branch owner only when the company has branch
 
 /* ───────────── branches ───────────── */
 
-test('every new branch has its own owner email, and gets the sign-ins the others leave free', async () => {
-  await multi({ limits: { maxBranches: 3, maxConcurrentLogins: 2 } });
+test('every new branch has its own owner email, and gets the company’s full sign-in limit', async () => {
+  const { organizationId } = await multi({ limits: { maxBranches: 3, maxConcurrentLogins: 2 } });
   const admin = await User.findOne({ email: 'admin@multi.in' });
   await assert.rejects(createBranch(admin, { name: 'Mumbai' }), /owner’s email and password/);
   await assert.rejects(createBranch(admin, { name: 'Mumbai', ownerEmail: 'pune@multi.in', ownerPassword: PW }), /already in use/);
-  // the first branch holds the whole pool (2): free some up before adding another branch
-  await assert.rejects(createBranch(admin, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW }), /Lower a branch’s sign-in limit/);
-  await updateBranchCaps(admin, admin.company, { limits: { maxConcurrentLogins: 1 } });
+  // the limit is not split between branches: the second branch gets all of it too
   const made = await createBranch(admin, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW });
   assert.equal(made.owner.email, 'mumbai@multi.in');
-  assert.equal(made.branch.limits.maxConcurrentLogins, 1);
-  await assert.rejects(updateBranchCaps(admin, made.branch.id, { limits: { maxConcurrentLogins: 2 } }), /cannot exceed the company pool/);
+  assert.equal(made.branch.limits.maxConcurrentLogins, 2);
+  const third = await createBranch(admin, { name: 'Nashik', ownerEmail: 'nashik@multi.in', ownerPassword: PW });
+  assert.equal(third.branch.limits.maxConcurrentLogins, 2);
+  for (const b of await Company.find({ organization: organizationId })) assert.equal(b.limits.maxConcurrentLogins, 2);
+  // branch limits are read-only for the company admin
+  const refusal = /Every branch can use the company’s full sign-in limit\. Contact the platform administrator to change it\./;
+  await assert.rejects(updateBranchCaps(admin, made.branch.id, { limits: { maxConcurrentLogins: 1 } }), refusal);
+  await assert.rejects(updateBranchCaps(admin, admin.company, { limits: { maxConcurrentLogins: 5 } }), refusal);
+  assert.equal((await Company.findById(made.branch.id)).limits.maxConcurrentLogins, 2);
+});
+
+test('adding a branch is not blocked by the sign-in numbers other branches hold', async () => {
+  const { organizationId } = await multi({ limits: { maxBranches: 3, maxConcurrentLogins: 4 } });
+  const admin = await User.findOne({ email: 'admin@multi.in' });
+  // an old branch number far above the company's (as the split-pool setup could leave behind)
+  await Company.updateOne({ _id: admin.company }, { $set: { 'limits.maxConcurrentLogins': 50 } });
+  const made = await createBranch(admin, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW });
+  assert.equal(made.branch.limits.maxConcurrentLogins, (await Organization.findById(organizationId)).limits.maxConcurrentLogins);
+  assert.equal(made.branch.limits.maxConcurrentLogins, 4);
 });
 
 test('branches created at the same moment never pass the branch limit', async () => {
   await multi({ limits: { maxBranches: 3, maxConcurrentLogins: 20 } });
   const admin = await User.findOne({ email: 'admin@multi.in' });
-  await updateBranchCaps(admin, admin.company, { limits: { maxConcurrentLogins: 2 } });
   const results = await Promise.allSettled(['a', 'b', 'c', 'd', 'e'].map((k) => createBranch(admin, { name: `Branch ${k}`, ownerEmail: `${k}@multi.in`, ownerPassword: PW })));
   assert.equal(results.filter((r) => r.status === 'fulfilled').length, 2); // 1 existing + 2 = the limit of 3
   for (const r of results.filter((x) => x.status === 'rejected')) assert.match(r.reason.message, /at most 3 branches/);
@@ -164,7 +178,6 @@ test('a company admin login only works in a company with branches', async () => 
 test('deleting a branch moves the company admin to another branch; deleting the last one removes the whole company', async () => {
   await multi();
   const admin = await User.findOne({ email: 'admin@multi.in' });
-  await updateBranchCaps(admin, admin.company, { limits: { maxConcurrentLogins: 2 } });
   const second = await createBranch(admin, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW });
 
   await deleteCompany(admin.company); // the branch the admin works in
@@ -178,7 +191,7 @@ test('deleting a branch moves the company admin to another branch; deleting the 
   assert.deepEqual(await counts(), { orgs: 0, branches: 0, users: 0 });
 });
 
-test('the platform admin can change and reset the company admin’s sign-in, and the sign-in pool stays consistent', async () => {
+test('the platform admin can change and reset the company admin’s sign-in, and every branch keeps the company’s sign-in limit', async () => {
   await multi();
   const admin = await User.findOne({ email: 'admin@multi.in' });
   const branchId = String(admin.company);
@@ -191,17 +204,45 @@ test('the platform admin can change and reset the company admin’s sign-in, and
   assert.ok(await verifyPassword('Newpass456', (await User.findOne({ email: 'boss@multi.in' })).passwordHash));
   assert.ok(await verifyPassword(PW, (await User.findOne({ email: 'pune@multi.in' })).passwordHash)); // owner untouched
 
-  // the pool (6) is held by the first branch: it can't be cut below that, and the branch cap is not overwritten
-  await assert.rejects(updateCompanyAsAdmin(branchId, { limits: { maxConcurrentLogins: 2 } }), /already hold 6 sign-ins/);
+  // the sign-in limit (6) is not a pool held by the branches: it can be lowered, and every branch follows it
+  const loginLimits = async () => ({
+    org: (await Organization.findOne()).limits.maxConcurrentLogins,
+    branches: (await Company.find().sort({ name: 1 })).map((b) => b.limits.maxConcurrentLogins),
+  });
+  await updateCompanyAsAdmin(branchId, { limits: { maxConcurrentLogins: 2 } });
+  assert.deepEqual(await loginLimits(), { org: 2, branches: [2] });
   await updateCompanyAsAdmin(branchId, { limits: { maxConcurrentLogins: 10 } });
-  assert.equal((await Organization.findOne()).limits.maxConcurrentLogins, 10);
-  assert.equal((await Company.findById(branchId)).limits.maxConcurrentLogins, 6);
+  assert.deepEqual(await loginLimits(), { org: 10, branches: [10] });
   // the branch limit can't go below the branches that exist
   const boss = await User.findOne({ email: 'boss@multi.in' });
   await createBranch(boss, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW });
   await assert.rejects(updateCompanyAsAdmin(branchId, { limits: { maxBranches: 1 } }), /already has 2 branches/);
   await updateCompanyAsAdmin(branchId, { limits: { maxBranches: 2 } });
   assert.equal((await Organization.findOne()).limits.maxBranches, 2);
+  // lowering with two branches reaches both of them
+  await updateCompanyAsAdmin(branchId, { limits: { maxConcurrentLogins: 2 } });
+  assert.deepEqual(await loginLimits(), { org: 2, branches: [2, 2] });
+});
+
+test('a sign-in limit typed in the same save as a plan change wins over the plan’s number', async () => {
+  const { organizationId } = await multi();
+  const admin = await User.findOne({ email: 'admin@multi.in' });
+  const branchId = String(admin.company);
+  await createBranch(admin, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW });
+  const planOf = (code, maxConcurrentLogins) => Plan.create({ code, name: code, kind: 'fixed', priceMonthly: 100, maxConcurrentLogins, maxBranches: 3, maxClients: 50, maxDesigns: 50 });
+  const loginLimits = async () => ({
+    org: (await Organization.findById(organizationId)).limits.maxConcurrentLogins,
+    branches: (await Company.find({ organization: organizationId })).map((b) => b.limits.maxConcurrentLogins),
+  });
+
+  const typed = await planOf('typed', 3);
+  await updateCompanyAsAdmin(branchId, { planId: String(typed._id), limits: { maxConcurrentLogins: 7 } });
+  assert.deepEqual(await loginLimits(), { org: 7, branches: [7, 7] });
+
+  // without a typed number the plan's number applies
+  const untyped = await planOf('untyped', 4);
+  await updateCompanyAsAdmin(branchId, { planId: String(untyped._id) });
+  assert.deepEqual(await loginLimits(), { org: 4, branches: [4, 4] });
 });
 
 test('a company without branches: no admin email to set, and its branch limit stays at one', async () => {
