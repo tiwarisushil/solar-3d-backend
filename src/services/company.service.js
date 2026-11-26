@@ -2,11 +2,11 @@
 import mongoose from 'mongoose';
 import { DEFAULT_AGENT_ROLES, DEFAULT_STEP_PRIORITY, ROLES, STEP_PRIORITIES } from '../constants/index.js';
 import { AuthSession, Client, Company, Design, Notification, Organization, Plan, Product, User } from '../models/index.js';
-import { applyPlanLimitsToCompany, applyPlanToOrganization, planSummary } from './plan.service.js';
+import { applyPlanToOrganization, planSummary } from './plan.service.js';
 import { syncBranchLoginLimits, usageOf } from './orgLimits.service.js';
 import { parseInvoiceNumbering } from './invoiceNumber.service.js';
 import { parseProposalNumbering } from './proposalNumber.service.js';
-import { assignPlanAsAdmin, ensureCompanySubscription, subscriptionView } from './subscription.service.js';
+import { ensureCompanySubscription } from './subscription.service.js';
 import { impersonationSession } from './auth.service.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/HttpError.js';
 import { hashPassword } from '../utils/password.js';
@@ -239,41 +239,92 @@ export async function updateCompanyAsAdmin(id, body) {
     if (maxBranches < branchCount) throw badRequest(`This company already has ${branchCount} branches; the limit can’t be lower.`);
   }
 
-  applyAdminFields(company, { ...body, limits: withBranches ? undefined : body?.limits });
-  const prevPlanId = String(company.planRef || '');
-  const plan = body?.planId ? await assignPlanAsAdmin(company, body.planId, { limits: company.limits }) : null;
-  // the company-wide caps this save leaves: a plan change sets them from the plan (typed numbers win); otherwise only typed numbers change them
-  const planChanged = Boolean(plan) && String(plan._id) !== prevPlanId;
-  // the one sign-in limit this save leaves, used by every branch's owners and the company admin (a typed number wins over the plan)
-  const typedLogins = body?.limits?.maxConcurrentLogins;
-  const nextLogins = planChanged ? (typedLogins != null ? whole(typedLogins) : (plan.maxConcurrentLogins ?? current)) : (logins ?? current);
-  // assignPlanAsAdmin writes a fixed plan's number onto the branch; the final number replaces it
-  if (nextLogins != null) company.limits.maxConcurrentLogins = nextLogins;
+  const previousPlanId = String(company.planRef || '');
+  const currentPlan = previousPlanId ? await Plan.findById(company.planRef) : null;
+  let requestedPlan = null;
+  if (body?.planId) {
+    requestedPlan = await Plan.findById(objectId(body.planId, 'Plan'));
+    if (!requestedPlan) throw notFound('Plan');
+  }
+  const requestedPlanChanged = Boolean(requestedPlan) && String(requestedPlan._id) !== previousPlanId;
+  // A real commercial change always becomes a dedicated custom plan. A normal profile/status save sends the current
+  // plan and limits back too, so equal values must not convert it.
+  const customizePlan = body?.customizePlan === true || requestedPlanChanged || logins != null || maxBranches != null || maxClients != null || maxDesigns != null;
+  const basePlan = requestedPlan || currentPlan;
+  const pickLimit = (typed, currentValue, planValue) => {
+    if (typed != null) return whole(typed);
+    if (requestedPlanChanged && planValue != null) return whole(planValue);
+    return whole(currentValue ?? planValue);
+  };
+  const customLimits = customizePlan ? {
+    maxConcurrentLogins: pickLimit(body?.limits?.maxConcurrentLogins, current, basePlan?.maxConcurrentLogins),
+    maxBranches: withBranches ? pickLimit(body?.limits?.maxBranches, org?.limits?.maxBranches, basePlan?.maxBranches) : 1,
+    maxClients: pickLimit(body?.limits?.maxClients, org?.limits?.maxClients, basePlan?.maxClients),
+    maxDesigns: pickLimit(body?.limits?.maxDesigns, org?.limits?.maxDesigns, basePlan?.maxDesigns),
+  } : null;
+
   if (org) {
     const usage = await usageOf(company);
-    const nextClients = planChanged ? (body?.limits?.maxClients != null ? whole(body.limits.maxClients) : plan.maxClients) : (maxClients ?? org.limits?.maxClients);
-    const nextDesigns = planChanged ? (body?.limits?.maxDesigns != null ? whole(body.limits.maxDesigns) : plan.maxDesigns) : (maxDesigns ?? org.limits?.maxDesigns);
+    const nextClients = customLimits?.maxClients ?? maxClients ?? org.limits?.maxClients;
+    const nextDesigns = customLimits?.maxDesigns ?? maxDesigns ?? org.limits?.maxDesigns;
     if (nextClients != null && nextClients < usage.clients) throw badRequest(`This company already has ${usage.clients} clients across its branches; the limit can’t be lower.`);
     if (nextDesigns != null && nextDesigns < usage.designs) throw badRequest(`This company already has ${usage.designs} designs across its branches; the limit can’t be lower.`);
   }
+
+  let plan = basePlan;
+  if (customizePlan) {
+    const ownerName = String(org?.name || company.name).trim();
+    const planName = (String(body?.planName ?? '').trim() || ownerName).slice(0, 80);
+    const priceMonthly = body?.priceMonthly == null ? Number(basePlan?.priceMonthly || 0) : Number(body.priceMonthly);
+    if (!Number.isFinite(priceMonthly) || priceMonthly < 0 || priceMonthly > 1e7) throw badRequest('Enter a valid monthly price');
+    const reusable = currentPlan?.kind === 'custom'
+      && String(currentPlan.forCompany || '') === String(company._id)
+      && (!requestedPlan || String(requestedPlan._id) === String(currentPlan._id));
+    const planData = {
+      name: planName,
+      description: `Custom plan for ${ownerName}`,
+      kind: 'custom',
+      priceMonthly,
+      ...customLimits,
+      selfServe: false,
+      active: true,
+      forCompany: company._id,
+    };
+    if (reusable) {
+      Object.assign(currentPlan, planData);
+      await currentPlan.save();
+      plan = currentPlan;
+    } else {
+      plan = await Plan.create({
+        code: `co-${String(company._id).slice(-8)}-${String(new mongoose.Types.ObjectId()).slice(-8)}`,
+        features: basePlan?.features || [],
+        ...planData,
+      });
+    }
+    company.planRef = plan._id;
+  }
+
+  applyAdminFields(company, { ...body, limits: withBranches ? undefined : body?.limits });
+  const nextLogins = customLimits?.maxConcurrentLogins ?? logins ?? current;
+  if (nextLogins != null) company.limits.maxConcurrentLogins = nextLogins;
   await ensureCompanySubscription(company);
   await company.save();
   // feature switches are shared by the whole company (read from the organization)
   if (org && body?.features) Object.assign(org.features, pick(body.features, ['pdfBranding', 'excelImport']));
-  // moving to a plan sets the company-wide caps from it (never below what the company already holds); numbers typed in the same save win
-  if (org && planChanged) {
-    // typed numbers override the plan's defaults; untyped caps come from the plan
-    applyPlanToOrganization(org, plan, { maxClients: body?.limits?.maxClients, maxDesigns: body?.limits?.maxDesigns, maxConcurrentLogins: nextLogins });
+  if (org && customizePlan) {
+    org.planRef = plan._id;
+    applyPlanToOrganization(org, plan, customLimits);
     const held = await Company.countDocuments({ organization: org._id });
     org.limits.maxBranches = Math.max(org.limits.maxBranches, held);
   }
   const loginsChanged = nextLogins != null && (nextLogins !== current || nextLogins !== org?.limits?.maxConcurrentLogins);
-  if (org && (logins != null || loginsChanged || maxBranches != null || maxClients != null || maxDesigns != null || plan || body?.features)) {
-    if (maxClients != null) org.limits.maxClients = maxClients;
-    if (maxDesigns != null) org.limits.maxDesigns = maxDesigns;
+  if (org && (customizePlan || logins != null || loginsChanged || maxBranches != null || maxClients != null || maxDesigns != null || body?.features)) {
+    if (!customizePlan && maxClients != null) org.limits.maxClients = maxClients;
+    if (!customizePlan && maxDesigns != null) org.limits.maxDesigns = maxDesigns;
     if (nextLogins != null) org.limits.maxConcurrentLogins = nextLogins;
-    if (maxBranches != null) org.limits.maxBranches = maxBranches; // a company without branches always keeps exactly one
+    if (!customizePlan && maxBranches != null) org.limits.maxBranches = maxBranches; // a company without branches always keeps exactly one
     await org.save();
+    if (customizePlan) await Company.updateMany({ organization: org._id, _id: { $ne: company._id } }, { $set: { planRef: plan._id } });
     await syncBranchLoginLimits(org); // every branch carries the same number as the organization
   }
   const user = await loginOf(company._id);

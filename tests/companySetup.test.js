@@ -84,6 +84,34 @@ test('with branches: the given email is the company admin and the first branch h
   assert.equal((await userView(owner)).managesMasters, false);
 });
 
+test('creating a company can turn the selected fixed plan into a dedicated custom plan', async () => {
+  const fixed = await Plan.create({
+    code: 'launch', name: 'Launch', kind: 'fixed', priceMonthly: 30,
+    maxConcurrentLogins: 2, maxBranches: 3, maxClients: 500, maxDesigns: 50,
+  });
+  const { organizationId, branchId } = await solo({
+    planId: fixed.id,
+    customizePlan: true,
+    planName: 'Solo Solar Launch',
+    priceMonthly: 45,
+    limits: { maxConcurrentLogins: 4, maxBranches: 8, maxClients: 750, maxDesigns: 90 },
+  });
+
+  const custom = await Plan.findOne({ kind: 'custom', forCompany: branchId });
+  const [org, branch] = await Promise.all([Organization.findById(organizationId), Company.findById(branchId)]);
+  assert.ok(custom);
+  assert.equal(custom.name, 'Solo Solar Launch');
+  assert.equal(custom.priceMonthly, 45);
+  assert.deepEqual(
+    [custom.maxConcurrentLogins, custom.maxBranches, custom.maxClients, custom.maxDesigns],
+    [4, 1, 750, 90],
+  );
+  assert.equal(String(org.planRef), custom.id);
+  assert.equal(String(branch.planRef), custom.id);
+  assert.equal(branch.limits.maxConcurrentLogins, 4);
+  assert.equal((await Plan.findById(fixed._id)).priceMonthly, 30);
+});
+
 test('how a company was set up can never be changed afterwards', async () => {
   const { organizationId } = await solo();
   const org = await Organization.findById(organizationId);
@@ -222,6 +250,61 @@ test('the platform admin can change and reset the company admin’s sign-in, and
   // lowering with two branches reaches both of them
   await updateCompanyAsAdmin(branchId, { limits: { maxConcurrentLogins: 2 } });
   assert.deepEqual(await loginLimits(), { org: 2, branches: [2, 2] });
+});
+
+test('editing a company plan creates one dedicated custom plan and later edits reuse it', async () => {
+  const { organizationId } = await multi();
+  const admin = await User.findOne({ email: 'admin@multi.in' });
+  const branchId = String(admin.company);
+  await createBranch(admin, { name: 'Mumbai', ownerEmail: 'mumbai@multi.in', ownerPassword: PW });
+  const fixed = await Plan.create({
+    code: 'business', name: 'Business', kind: 'fixed', priceMonthly: 100,
+    maxConcurrentLogins: 4, maxBranches: 3, maxClients: 50, maxDesigns: 75,
+  });
+  await Promise.all([
+    Company.updateMany({ organization: organizationId }, { $set: { planRef: fixed._id } }),
+    Organization.updateOne({ _id: organizationId }, { $set: { planRef: fixed._id, 'limits.maxConcurrentLogins': 4, 'limits.maxBranches': 3, 'limits.maxClients': 50, 'limits.maxDesigns': 75 } }),
+  ]);
+
+  await updateCompanyAsAdmin(branchId, {
+    planId: fixed.id,
+    customizePlan: true,
+    limits: { maxConcurrentLogins: 6, maxBranches: 4, maxClients: 80, maxDesigns: 120 },
+  });
+  const custom = await Plan.findOne({ kind: 'custom', forCompany: branchId });
+  assert.ok(custom);
+  assert.equal(custom.name, 'Multi Solar');
+  assert.equal(custom.priceMonthly, 100);
+  assert.deepEqual(
+    [custom.maxConcurrentLogins, custom.maxBranches, custom.maxClients, custom.maxDesigns],
+    [6, 4, 80, 120],
+  );
+  assert.equal((await Plan.findById(fixed._id)).kind, 'fixed');
+  assert.equal((await Plan.findById(fixed._id)).priceMonthly, 100);
+  assert.ok((await Company.find({ organization: organizationId })).every((b) => String(b.planRef) === custom.id));
+  assert.equal(String((await Organization.findById(organizationId)).planRef), custom.id);
+
+  // Saving profile fields and unchanged commercial values does not create or modify a plan.
+  await updateCompanyAsAdmin(branchId, {
+    contactName: 'New owner name', planId: custom.id, planName: 'Ignored default', priceMonthly: 999,
+    limits: { maxConcurrentLogins: 6, maxBranches: 4, maxClients: 80, maxDesigns: 120 },
+  });
+  assert.equal(await Plan.countDocuments({ kind: 'custom' }), 1);
+  assert.equal((await Plan.findById(custom._id)).name, 'Multi Solar');
+  assert.equal((await Plan.findById(custom._id)).priceMonthly, 100);
+
+  await updateCompanyAsAdmin(branchId, {
+    planId: custom.id, customizePlan: true, planName: 'Multi Enterprise', priceMonthly: 225.5,
+    limits: { maxConcurrentLogins: 8, maxBranches: 5, maxClients: 100, maxDesigns: 150 },
+  });
+  const edited = await Plan.findById(custom._id);
+  assert.equal(await Plan.countDocuments({ kind: 'custom' }), 1);
+  assert.equal(edited.name, 'Multi Enterprise');
+  assert.equal(edited.priceMonthly, 225.5);
+  assert.deepEqual(
+    [edited.maxConcurrentLogins, edited.maxBranches, edited.maxClients, edited.maxDesigns],
+    [8, 5, 100, 150],
+  );
 });
 
 test('a sign-in limit typed in the same save as a plan change wins over the plan’s number', async () => {

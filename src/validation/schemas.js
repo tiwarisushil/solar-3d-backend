@@ -177,6 +177,9 @@ export const adminCompanyCreateSchema = obj({
   branchOwnerName: f.personNameOptional,
   branchOwnerEmail: f.emailOptional,
   branchOwnerPassword: f.optionalNewPassword,
+  planName: f.textRequired(80, 'Plan name').optional(),
+  priceMonthly: f.numOptional({ min: 0, max: 1e7, label: 'Monthly price' }),
+  customizePlan: z.boolean().optional(),
   notes: f.textOptional(1000, 'Notes'),
   limits: limits.optional(),
 }).superRefine((v, ctx) => {
@@ -185,7 +188,16 @@ export const adminCompanyCreateSchema = obj({
   else if (v.branchOwnerEmail === v.loginEmail) ctx.addIssue({ code: 'custom', path: ['branchOwnerEmail'], message: 'Use a different email from the company admin' });
   if (!v.branchOwnerPassword) ctx.addIssue({ code: 'custom', path: ['branchOwnerPassword'], message: 'Enter a password for the branch owner' });
 });
-export const adminCompanyUpdateSchema = obj({ ...companyProfile, loginEmail: f.emailOptional, adminEmail: f.emailOptional, notes: f.textOptional(1000, 'Notes'), limits: limits.optional() }).partial();
+export const adminCompanyUpdateSchema = obj({
+  ...companyProfile,
+  loginEmail: f.emailOptional,
+  adminEmail: f.emailOptional,
+  planName: f.textRequired(80, 'Plan name').optional(),
+  priceMonthly: f.numOptional({ min: 0, max: 1e7, label: 'Monthly price' }),
+  customizePlan: z.boolean().optional(),
+  notes: f.textOptional(1000, 'Notes'),
+  limits: limits.optional(),
+}).partial();
 export const passwordResetSchema = obj({ password: f.newPassword, who: z.enum(['owner', 'admin']).optional() });
 
 export const planSchema = obj({

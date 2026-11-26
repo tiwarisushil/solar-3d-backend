@@ -10,7 +10,6 @@ import { after, before, beforeEach, test } from 'node:test';
 import express from 'express';
 import mongoose from 'mongoose';
 import { MongoMemoryReplSet } from 'mongodb-memory-server';
-
 process.env.S3_BUCKET = '';
 process.env.JWT_SECRET ||= 'test-only-secret';
 
