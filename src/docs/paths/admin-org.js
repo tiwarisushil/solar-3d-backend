@@ -1220,7 +1220,7 @@ export default {
       tags: ['Admin'],
       operationId: 'adminCreateCompany',
       summary: 'Create a company, with or without branches, and its first sign-in.',
-      description: `${superadmin} Returns 201 and the new branch in the same shape as the list. The password is hashed and is not in the response. No email is sent: give the password to the customer yourself.\n\n\`hasBranches\` false (or omitted): one workspace and one sign-in. loginEmail is the branch owner (role branch), who also manages masters. The branch is named after the company.\n\n\`hasBranches\` true: loginEmail is the company admin (role company). The first branch gets its own owner. branchOwnerEmail and branchOwnerPassword are then required ("Enter the branch owner’s email" / "Enter a password for the branch owner"). The two emails must differ ("Use a different email from the company admin"). branchName blank becomes "{company name} — Main".\n\nDuplicate emails: 400 "That login email is already in use" or "That branch owner email is already in use". Password must be 8 to 200 characters and contain a letter and a number. Default categories are seeded on the new branch.\n\n\`planId\`, when it is a real id, assigns that plan and starts a 30-day subscription. Caps you type override the plan. A company without branches is forced to maxBranches 1. \`status\` omitted is active. Send only active or suspended; that value is stored on both the organization and the first branch.`,
+      description: `${superadmin} Returns 201 and the new branch in the same shape as the list. The password is hashed and is not in the response. No email is sent: give the password to the customer yourself.\n\n\`hasBranches\` false (or omitted): one workspace and one sign-in. loginEmail is the branch owner (role branch), who also manages masters. The branch is named after the company.\n\n\`hasBranches\` true: loginEmail is the company admin (role company). The first branch gets its own owner. branchOwnerEmail and branchOwnerPassword are then required ("Enter the branch owner’s email" / "Enter a password for the branch owner"). The two emails must differ ("Use a different email from the company admin"). branchName blank becomes "{company name} — Main".\n\nDuplicate emails: 400 "That login email is already in use" or "That branch owner email is already in use". Password must be 8 to 200 characters and contain a letter and a number. Default categories are seeded on the new branch.\n\n\`planId\`, when it is a real id, supplies the base plan and starts a 30-day subscription. Caps you type override the plan. When \`customizePlan\` is true, creation makes a dedicated custom plan using those caps, \`planName\` (default: company name), and \`priceMonthly\` (default: base plan price); the fixed base plan is unchanged. A company without branches is forced to maxBranches 1. \`status\` omitted is active. Send only active or suspended; that value is stored on both the organization and the first branch.`,
       security: bearer,
       requestBody: {
         required: true,
@@ -1240,7 +1240,10 @@ export default {
                 branchOwnerEmail: { type: 'string', description: 'Required when hasBranches is true. Must differ from loginEmail.' },
                 branchOwnerPassword: { type: 'string', description: 'Required when hasBranches is true. Same password rules. Not returned. "" is rejected.' },
                 notes: { type: 'string', maxLength: 1000, description: 'Private admin notes.' },
-                planId: ObjectId,
+                planId: { ...ObjectId, description: 'Fixed plan used as the base.' },
+                planName: { type: 'string', maxLength: 80, description: 'Custom plan name when customizePlan is true. Blank or omitted uses the company name.' },
+                priceMonthly: { type: 'number', minimum: 0, maximum: 10000000, description: 'Custom monthly price. Omit to use the base plan price.' },
+                customizePlan: { type: 'boolean', description: 'True when the admin selected a plan or changed a commercial limit and wants a dedicated custom plan.' },
                 status: { type: 'string', enum: ['active', 'suspended'], description: 'Omit for active.' },
                 limits: limitsShape,
                 features: featuresShape,
@@ -1261,8 +1264,8 @@ export default {
     patch: {
       tags: ['Admin'],
       operationId: 'adminUpdateCompany',
-      summary: 'Edit a branch, its plan, its caps, and its sign-in emails.',
-      description: `${superadmin} Partial. Omit a key to leave it. Unknown id is 404 "Company not found". This edits one branch row. \`status\` is active or suspended for this branch only; it does not suspend the whole organization. An invalid status is 400 from the database ("… is not a valid status").\n\n\`planId\` assigns that plan. Unknown plan is 404 "Plan not found". Changing plan does not restart the billing period if one already exists. Typed caps win over the plan’s defaults. A company that already has more clients or designs than the new cap is 400 "This company already has {n} clients across its branches; the limit can’t be lower." (same sentence for designs).\n\n\`limits.maxConcurrentLogins\` is the company’s sign-in limit. It is written on the organization and copied onto every branch, so each branch’s owners and the company admin may each have that many devices signed in; it is not split between branches. A typed number wins over the plan’s number in the same save. Lowering it is always allowed. \`limits.maxBranches\` cannot go below the number of branches: 400 "This company already has {n} branches; the limit can’t be lower." Without branches, the same sign-in limit applies to the single branch’s owner and maxBranches stays 1.\n\n\`loginEmail\` changes the branch owner’s sign-in. \`contactName\` changes that user’s name. \`adminEmail\` changes the company admin; sending it (non-blank) on a company without an admin is 400 "This company has no company admin: it was set up without branches". A taken email is 400 "That email is already in use". Blank adminEmail is ignored. \`features\` (pdfBranding, excelImport) is copied onto the branch and the organization. \`notes\` is the private admin note. No email is sent.`,
+      summary: 'Edit a branch and save commercial changes as a custom plan.',
+      description: `${superadmin} Partial. Omit a key to leave it. Unknown id is 404 "Company not found". This edits one branch row. \`status\` is active or suspended for this branch only; it does not suspend the whole organization. An invalid status is 400 from the database ("… is not a valid status").\n\nChanging \`planId\` or any cap creates a dedicated custom plan for the company. The UI enables \`planName\` and \`priceMonthly\` only after one of those commercial values changes; name or price alone does not initiate conversion. The fixed source plan is never modified. \`customizePlan: true\` explicitly saves the submitted commercial values as custom even when the caps and selected plan are unchanged. The custom plan defaults to the organization/company name and the selected or current plan price when \`planName\` or \`priceMonthly\` is omitted. Later edits reuse that company’s dedicated custom plan. Every branch in the organization is linked to it. Changing the plan does not restart an existing billing period. A company that already has more clients or designs than the new cap is 400 "This company already has {n} clients across its branches; the limit can’t be lower." (same sentence for designs).\n\n\`limits.maxConcurrentLogins\` is the company’s sign-in limit. It is written on the organization and copied onto every branch, so each branch’s owners and the company admin may each have that many devices signed in; it is not split between branches. Lowering it is always allowed. \`limits.maxBranches\` cannot go below the number of branches: 400 "This company already has {n} branches; the limit can’t be lower." Without branches, the same sign-in limit applies to the single branch’s owner and maxBranches stays 1.\n\n\`loginEmail\` changes the branch owner’s sign-in. \`contactName\` changes that user’s name. \`adminEmail\` changes the company admin; sending it (non-blank) on a company without an admin is 400 "This company has no company admin: it was set up without branches". A taken email is 400 "That email is already in use". Blank adminEmail is ignored. \`features\` (pdfBranding, excelImport) is copied onto the branch and the organization. \`notes\` is the private admin note. No email is sent.`,
       security: bearer,
       parameters: [idParam],
       requestBody: {
@@ -1271,7 +1274,7 @@ export default {
           'application/json': {
             schema: {
               type: 'object',
-              description: 'Every field optional. The validator does not list status, planId, features, or contactName; the service still reads them.',
+              description: 'Every field optional. Unknown fields are preserved by validation but ignored unless the service reads them.',
               properties: {
                 ...companyProfileFields,
                 loginEmail: { type: 'string', description: 'Branch owner sign-in. Omit to leave it. "" is rejected by the email check if you send it.' },
@@ -1279,7 +1282,10 @@ export default {
                 contactName: { type: 'string', description: 'Branch owner’s display name. Not validated as a length-limited name; stored as sent.' },
                 notes: { type: 'string', maxLength: 1000, description: '"" clears the note.' },
                 status: { type: 'string', enum: ['active', 'suspended'] },
-                planId: { ...ObjectId, description: 'Assign this plan. Omit to leave the current plan.' },
+                planId: { ...ObjectId, description: 'Fixed or current custom plan used as the base. A change is saved as a dedicated custom plan.' },
+                planName: { type: 'string', maxLength: 80, description: 'Custom plan name. Omit to use the organization/company name.' },
+                priceMonthly: { type: 'number', minimum: 0, maximum: 10000000, description: 'Custom monthly price. Omit to use the selected or current plan price.' },
+                customizePlan: { type: 'boolean', description: 'Set true when the admin edited plan details even if the selected plan and caps are unchanged.' },
                 limits: limitsShape,
                 features: featuresShape,
               },

@@ -513,9 +513,53 @@ export async function createOrganizationWithBranch(body) {
       website: body?.website,
       taxId: body?.taxId,
       pan: body?.pan,
+      planRef: plan?._id || null,
+      subscription: plan ? { periodStart: org.subscription.periodStart, periodEnd: org.subscription.periodEnd, status: org.subscription.status, billingCycle: org.subscription.billingCycle } : undefined,
       limits: { maxConcurrentLogins: org.limits.maxConcurrentLogins },
       status: body?.status || 'active',
     }], { session });
+
+    if (body?.customizePlan === true) {
+      const positive = (value, fallback) => {
+        const n = Math.floor(Number(value));
+        if (Number.isFinite(n) && n >= 1) return n;
+        return Math.max(1, Math.floor(Number(fallback)) || 1);
+      };
+      const customLimits = {
+        maxConcurrentLogins: positive(body?.limits?.maxConcurrentLogins, org.limits.maxConcurrentLogins),
+        maxBranches: hasBranches ? positive(body?.limits?.maxBranches, org.limits.maxBranches) : 1,
+        maxClients: positive(body?.limits?.maxClients, org.limits.maxClients),
+        maxDesigns: positive(body?.limits?.maxDesigns, org.limits.maxDesigns),
+      };
+      const priceMonthly = body?.priceMonthly == null ? Number(plan?.priceMonthly || 0) : Number(body.priceMonthly);
+      if (!Number.isFinite(priceMonthly) || priceMonthly < 0 || priceMonthly > 1e7) throw badRequest('Enter a valid monthly price');
+      const planName = (String(body?.planName ?? '').trim() || name).slice(0, 80);
+      const [custom] = await Plan.create([{
+        code: `co-${String(branch._id).slice(-8)}-${String(new mongoose.Types.ObjectId()).slice(-8)}`,
+        name: planName,
+        description: `Custom plan for ${name}`,
+        kind: 'custom',
+        priceMonthly,
+        ...customLimits,
+        features: plan?.features || [],
+        selfServe: false,
+        active: true,
+        forCompany: branch._id,
+      }], { session });
+      if (!org.subscription?.periodStart) org.subscription = { periodStart: new Date(), periodEnd: new Date(Date.now() + 30 * 86400000) };
+      org.planRef = custom._id;
+      applyPlanToOrganization(org, custom, customLimits);
+      branch.planRef = custom._id;
+      branch.limits.maxConcurrentLogins = customLimits.maxConcurrentLogins;
+      branch.subscription = {
+        periodStart: org.subscription.periodStart,
+        periodEnd: org.subscription.periodEnd,
+        status: org.subscription.status,
+        billingCycle: org.subscription.billingCycle,
+      };
+      await org.save({ session });
+      await branch.save({ session });
+    }
 
     const users = hasBranches
       ? [
